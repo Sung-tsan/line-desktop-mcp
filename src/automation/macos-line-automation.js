@@ -1,8 +1,35 @@
 // macos-line-automation.js
 import applescript from 'applescript';
+import { execSync } from 'child_process';
+import fs from 'fs';
 import { promisify } from 'util';
 
 const execAppleScript = promisify(applescript.execString);
+
+function resolveCliclickPath() {
+  const envPath = process.env.CLICLICK_PATH;
+  if (envPath && fs.existsSync(envPath)) {
+    return envPath;
+  }
+  const pathEnv = `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`;
+  try {
+    const p = execSync('which cliclick', {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: pathEnv },
+    })
+      .trim()
+      .split('\n')[0];
+    if (p && fs.existsSync(p)) return p;
+  } catch {
+    // fall through
+  }
+  for (const c of ['/opt/homebrew/bin/cliclick', '/usr/local/bin/cliclick']) {
+    if (fs.existsSync(c)) return c;
+  }
+  throw new Error(
+    'cliclick not found. Install with: brew install cliclick, or set CLICLICK_PATH to the binary.'
+  );
+}
 
 export class MacOSLineAutomation {
   constructor() {
@@ -11,6 +38,12 @@ export class MacOSLineAutomation {
     this.delayShort = 0.15; // 秒
     this.delayMid = 0.35;
     this.delayLong = 3;
+    this.cliclickPath = resolveCliclickPath();
+  }
+
+  /** AppleScript：以 quoted form 安全呼叫 cliclick（cxVar/cyVar 為 AppleScript 變數名） */
+  cliclickShellClick(cxVar, cyVar) {
+    return `do shell script (quoted form of "${this.appleEsc(this.cliclickPath)}") & " c:" & ${cxVar} & "," & ${cyVar}`;
   }
 
   // -------- 小工具 --------
@@ -90,7 +123,7 @@ export class MacOSLineAutomation {
           set cx to xPosition + (xSize div 2)
           set cy to yPosition + (ySize div 2)
 
-          do shell script "/usr/local/bin/cliclick c:" & cx & "," & cy
+          ${this.cliclickShellClick('cx', 'cy')}
 
           delay ${this.delayShort}
 
@@ -117,9 +150,9 @@ export class MacOSLineAutomation {
           set cy2 to yPosition2 + (ySize2 div 2)-15
 			    
           -- 點擊進聊天室
-          do shell script "/usr/local/bin/cliclick c:" & cx2 & "," & cy2
+          ${this.cliclickShellClick('cx2', 'cy2')}
           delay ${this.delayShort}
-          do shell script "/usr/local/bin/cliclick c:" & cx2 & "," & cy2
+          ${this.cliclickShellClick('cx2', 'cy2')}
 
           delay ${this.delayLong}
         end tell
@@ -185,11 +218,11 @@ export class MacOSLineAutomation {
           set cx to xPosition + (xSize -20)
           set cy to yPosition + (ySize -15)
 			    
-          do shell script "/usr/local/bin/cliclick c:" & cx & "," & cy
+          ${this.cliclickShellClick('cx', 'cy')}
 
           delay ${this.delayLong}
 
-          do shell script "/usr/local/bin/cliclick c:" & cx & "," & cy
+          ${this.cliclickShellClick('cx', 'cy')}
           
           repeat ${t} times
             -- 按上方向鍵回上一頁
@@ -312,7 +345,7 @@ export class MacOSLineAutomation {
           set cx to xPosition + (xSize div 2)
           set cy to yPosition + (ySize div 2)
           
-          do shell script "/usr/local/bin/cliclick c:" & cx & "," & cy
+          ${this.cliclickShellClick('cx', 'cy')}
 
           delay ${this.delayShort}
 
@@ -427,7 +460,7 @@ export class MacOSLineAutomation {
           set cx to xPosition + (xSize div 4)
           set cy to yPosition - 10
           
-          do shell script "/usr/local/bin/cliclick c:" & cx & "," & cy
+          ${this.cliclickShellClick('cx', 'cy')}
 
           delay ${this.delayShort}
         end tell
