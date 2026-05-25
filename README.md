@@ -123,12 +123,18 @@ LINE Desktop MCP 是一個基於 Model Context Protocol 的整合工具，讓 AI
 **啟動 Streamable HTTP 模式：**
 
 ```bash
+# 本機使用（僅 localhost）
 npx line-desktop-mcp@latest --http-mode --port 3000
+
+# 開放外部連線（需搭配 token）
+npx line-desktop-mcp@latest --http-mode --host 0.0.0.0 --port 3000 --token YOUR_SECRET
 ```
 
 **參數說明：**
 - `--http-mode`：啟用 Streamable HTTP 模式，使用 HTTP streaming 而非 stdio
 - `--port <port>`：指定 HTTP 伺服器的 port（預設：3000）
+- `--host <host>`：指定綁定的網路介面（預設：`127.0.0.1`）
+- `--token <secret>`：設定 Bearer Token 驗證密鑰。當 `--host` 設為非 loopback 位址時為必填，以確保安全性
 
 **MCP 端點配置：**
 
@@ -323,12 +329,18 @@ In addition to the default stdio mode, this project also supports running via St
 **Start Streamable HTTP Mode:**
 
 ```bash
+# Local use (localhost only)
 npx line-desktop-mcp@latest --http-mode --port 3000
+
+# Allow external connections (token required)
+npx line-desktop-mcp@latest --http-mode --host 0.0.0.0 --port 3000 --token YOUR_SECRET
 ```
 
 **Parameters:**
 - `--http-mode`: Enable Streamable HTTP mode, using HTTP streaming instead of stdio
 - `--port <port>`: Specify the HTTP server port (default: 3000)
+- `--host <host>`: Specify the network interface to bind (default: `127.0.0.1`)
+- `--token <secret>`: Set Bearer Token authentication secret. Required when `--host` is set to a non-loopback address for security
 
 **MCP Endpoint Configuration:**
 

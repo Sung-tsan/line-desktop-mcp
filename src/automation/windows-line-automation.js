@@ -236,6 +236,7 @@ ${script}
     const messageParts = [];
     let currentPart = '';
 
+    /*
     const parts = message.split(/(@\S+\s)/g);
 
     for (let i = 0; i < parts.length; i++) {
@@ -250,7 +251,28 @@ ${script}
         currentPart += part;
       }
     }
+    */
+    
+    // Use regex to split by @mentions pattern (已排除 /@ 這個格式)
+    const parts = message.split(/((?<!\/)@\S+\s)/g);
+    
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (part.match(/^(?<!\/)@\S+\s$/)) {
+        // If we have accumulated text before this @mention, add it as a separate part
+        if (currentPart) {
+          messageParts.push(currentPart);
+          currentPart = '';
+        }
+        // Add the @mention as its own part
+        messageParts.push(part);
+      } else {
+        // Accumulate non-@mention text
+        currentPart += part;
+      }
+    }
 
+    // Add any remaining text
     if (currentPart) {
       messageParts.push(currentPart);
     }

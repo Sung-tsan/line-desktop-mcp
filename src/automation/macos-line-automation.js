@@ -93,6 +93,26 @@ export class MacOSLineAutomation {
       tell application "${this.appleEsc(this.lineAppName)}"
         activate
       end tell
+
+      -- 檢查是否成功成為前景
+      tell application "System Events"
+          repeat with i from 1 to 3
+              if frontmost of process "${this.appleEsc(this.lineAppName)}" is true then
+                  exit repeat
+              else
+                  delay 0.5
+                  tell application "${this.appleEsc(this.lineAppName)}" to activate
+              end if
+          end repeat
+      end tell
+
+      -- 檢查是否超過重試次數
+      tell application "System Events"
+          if frontmost of process "${this.appleEsc(this.lineAppName)}" is false then
+              error "無法將 LINE 置於前景。"
+          end if
+      end tell
+
     `;
     try {
       await execAppleScript(script);
@@ -111,10 +131,39 @@ export class MacOSLineAutomation {
 
          set the clipboard to "${this.appleEsc(chatName)}"
 
-          -- 叫出搜尋用點擊
-            -- 依你原始路徑抓元素clea
-          set theSearch to text field 1 of splitter group 1 of window 1
-          
+          -- 點擊『聊天』Icon
+          try
+          set the lineWin to window 1 
+          on error errMsg number errNum
+              if errNum is -1719 then
+                  return false
+              else
+                  error errMsg number errNum
+              end if
+          end try
+
+          -- 取得位置與大小（全域座標）
+          set {xPosition, yPosition} to position of lineWin
+          set {xSize, ySize} to size of lineWin
+
+          set cx to xPosition + 32
+          set cy to yPosition + 110
+
+          ${this.cliclickShellClick('cx', 'cy')}
+
+          delay ${this.delayMid}
+
+          -- 點擊『搜尋』textbox
+          try
+          set theSearch to text field 1 of splitter group 1 of window 1 
+          on error errMsg number errNum
+              if errNum is -1719 then
+                  return false
+              else
+                  error errMsg number errNum
+              end if
+          end try
+
           -- 取得位置與大小（全域座標）
           set {xPosition, yPosition} to position of theSearch
           set {xSize, ySize} to size of theSearch
@@ -267,6 +316,7 @@ export class MacOSLineAutomation {
     let currentPart = '';
     
     // Use regex to split by @mentions pattern
+    /*
     const parts = message.split(/(@\S+\s)/g);
     
     for (let i = 0; i < parts.length; i++) {
@@ -284,7 +334,27 @@ export class MacOSLineAutomation {
         currentPart += part;
       }
     }
+    */
     
+    // Use regex to split by @mentions pattern (已排除 /@ 這個格式)
+    const parts = message.split(/((?<!\/)@\S+\s)/g);
+    
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (part.match(/^(?<!\/)@\S+\s$/)) {
+        // If we have accumulated text before this @mention, add it as a separate part
+        if (currentPart) {
+          messageParts.push(currentPart);
+          currentPart = '';
+        }
+        // Add the @mention as its own part
+        messageParts.push(part);
+      } else {
+        // Accumulate non-@mention text
+        currentPart += part;
+      }
+    }
+
     // Add any remaining text
     if (currentPart) {
       messageParts.push(currentPart);

@@ -435,7 +435,7 @@ class LineDesktopMCPServer {
   }
 
 
-  async run(useSSE = false, port = 3000) {
+  async run(useSSE = false, port = 3000, host = '127.0.0.1', token = null) {
     if (useSSE) {
       // 使用 Streamable HTTP 模式（符合 MCP 2025-06-18 規範）
       const app = express();
@@ -453,6 +453,23 @@ class LineDesktopMCPServer {
       });
       
       app.use(express.json());
+      
+      // Bearer token 驗證中間件
+      if (token) {
+        app.use('/mcp', (req, res, next) => {
+          const authHeader = req.headers['authorization'];
+          if (!authHeader || authHeader !== `Bearer ${token}`) {
+            console.error(`[AUTH] Rejected request from ${req.ip} - invalid or missing token`);
+            res.status(401).json({
+              jsonrpc: '2.0',
+              error: { code: -32001, message: 'Unauthorized: invalid or missing Bearer token' },
+              id: null
+            });
+            return;
+          }
+          next();
+        });
+      }
       
       // MCP 端點路徑
       const endpoint = '/mcp';
@@ -555,11 +572,13 @@ class LineDesktopMCPServer {
       });
       
       
-      app.listen(port, '0.0.0.0', () => {
+      app.listen(port, host, () => {
         console.error(`LINE Desktop MCP Server running on Streamable HTTP mode`);
-        console.error(`  Local:   http://127.0.0.1:${port}${endpoint}`);
-        console.error(`  Network: http://0.0.0.0:${port}${endpoint}`);
-        console.error(`  Health:  http://127.0.0.1:${port}/health`);
+        console.error(`  Listening: http://${host}:${port}${endpoint}`);
+        console.error(`  Health:    http://${host}:${port}/health`);
+        if (token) {
+          console.error(`  Auth:      Bearer token required`);
+        }
         console.error(`Ready to accept connections...`);
       });
     } else {
@@ -576,7 +595,9 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const config = {
     sseMode: false,
-    port: 3000
+    port: 3000,
+    host: '127.0.0.1',
+    token: null
   };
   
   for (let i = 0; i < args.length; i++) {
@@ -585,6 +606,12 @@ function parseArgs() {
     } else if (args[i] === '--port' && i + 1 < args.length) {
       config.port = parseInt(args[i + 1], 10);
       i++; // 跳過下一個參數
+    } else if (args[i] === '--host' && i + 1 < args.length) {
+      config.host = args[i + 1];
+      i++;
+    } else if (args[i] === '--token' && i + 1 < args.length) {
+      config.token = args[i + 1];
+      i++;
     }
   }
   
@@ -596,11 +623,21 @@ await firstRunSetup();
 
 // 解析命令列參數並啟動伺服器
 const config = parseArgs();
+
+// 安全檢查：非 loopback 綁定必須提供 token
+if (config.sseMode && config.host !== '127.0.0.1' && config.host !== 'localhost') {
+  if (!config.token) {
+    console.error('ERROR: Binding to a non-loopback address requires --token <secret> for authentication.');
+    console.error('  Example: npx line-desktop-mcp --http-mode --host 0.0.0.0 --port 3000 --token MY_SECRET');
+    process.exit(1);
+  }
+}
+
 const server = new LineDesktopMCPServer();
 
 if (config.sseMode) {
-  console.error(`Starting server in  Streamable HTTP  mode on port ${config.port}`);
-  server.run(true, config.port).catch(console.error);
+  console.error(`Starting server in  Streamable HTTP  mode on ${config.host}:${config.port}`);
+  server.run(true, config.port, config.host, config.token).catch(console.error);
 } else {
   console.error('Starting server in stdio mode');
   server.run(false).catch(console.error);
