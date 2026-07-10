@@ -1,0 +1,7 @@
+{
+  "excludeNames": [
+    "某個不想掃的群組名稱",
+    "某位聯絡人"
+  ],
+  "excludeOfficialAccountsTab": true
+}
