@@ -55,6 +55,14 @@ const MSGAREA_MIN_X_FRAC = 0.33;
 const SIDEBAR_ROW_LOGICAL_H = 71; // px, one chat row height (measured live)
 const NAME_MIN_CONF = 0.82;
 
+// Sidebar column geometry (fraction of OCR width), measured live 2026-07-10:
+// avatar ≈ <0.095, chat name starts ≈0.105, timestamp column ≈0.23.
+const NAME_X_MIN_FRAC = 0.09; // name starts right of the avatar
+const NAME_X_MAX_FRAC = 0.20; // name ends left of the timestamp column
+const TS_X_MIN_FRAC = 0.20; // timestamps sit in the right part of the sidebar
+// A sidebar row's timestamp: 昨天/今天/星期X/上午|下午 HH:MM/HH:MM/M月D日/M/D.
+const SIDEBAR_TS_RE = /(昨天|今天|星期|週[一二三四五六日]|上午|下午|AM|PM|\d{1,2}:\d{2}|\d{1,2}\s*月\s*\d{1,2}|\d{1,2}\/\d{1,2})/;
+
 const TIME_RE = /(上午|下午|AM|PM|am|pm)?\s*\d{1,2}:\d{2}/;
 
 // ---------------------------------------------------------------------------
@@ -231,24 +239,41 @@ function isChatNameCandidate(text) {
 export async function listSidebarChats(wi) {
   const o = await captureOcr(wi);
   const scale = o.width / wi.winW;
-  const sidebarMaxX = o.width * SIDEBAR_MAX_X_FRAC;
   const rowHpx = SIDEBAR_ROW_LOGICAL_H * scale;
+  const lines = o.lines || [];
 
-  const left = (o.lines || [])
-    .filter((l) => l.x < sidebarMaxX)
-    .sort((a, b) => a.y - b.y);
+  // Each chat row has a name (left column) and a timestamp (right column) on the
+  // *same* baseline; message previews sit below the name and have NO adjacent
+  // timestamp. So we pair every timestamp with the nearest-y name candidate —
+  // this cleanly rejects previews/badges that the old topmost-line rule caught.
+  const stamps = lines.filter(
+    (l) => l.x > o.width * TS_X_MIN_FRAC && l.x < o.width * SIDEBAR_MAX_X_FRAC &&
+      l.text.trim().length <= 10 && SIDEBAR_TS_RE.test(l.text)
+  );
+  const nameCands = lines.filter(
+    (l) => l.x >= o.width * NAME_X_MIN_FRAC && l.x < o.width * NAME_X_MAX_FRAC &&
+      isChatNameCandidate(l.text)
+  );
 
   const chats = [];
-  let lastRowY = -Infinity;
-  for (const l of left) {
-    const startsNewRow = l.y - lastRowY > rowHpx * 0.55;
-    if (!startsNewRow) continue; // only the topmost line of each row is the name
-    lastRowY = l.y;
-    if ((l.conf ?? 1) < NAME_MIN_CONF) continue;
-    if (!isChatNameCandidate(l.text)) continue;
-    const { screenX, screenY } = pxToScreen(l, wi, scale);
-    chats.push({ name: l.text.trim(), screenX, screenY, pxY: l.y });
+  const usedName = new Set();
+  const usedRowY = [];
+  for (const ts of stamps.sort((a, b) => a.y - b.y)) {
+    // nearest unused name on the same row baseline
+    let best = null, bestDy = rowHpx * 0.5;
+    for (const n of nameCands) {
+      if (usedName.has(n)) continue;
+      const dy = Math.abs(n.y - ts.y);
+      if (dy < bestDy) { best = n; bestDy = dy; }
+    }
+    if (!best) continue;
+    if (usedRowY.some((y) => Math.abs(y - best.y) < rowHpx * 0.4)) continue; // one name per row
+    usedName.add(best);
+    usedRowY.push(best.y);
+    const { screenX, screenY } = pxToScreen(best, wi, scale);
+    chats.push({ name: best.text.trim(), screenX, screenY, pxY: best.y });
   }
+  chats.sort((a, b) => a.pxY - b.pxY);
   return chats;
 }
 
@@ -272,31 +297,52 @@ async function scrollToSidebarTop(wi) {
 }
 
 /**
+ * Normalize a chatroom name into a dedup key. OCR yields slightly different
+ * strings for the same chat across overlapping scroll pages (trailing …/⋯/./•/以
+ * bleed, half/full-width, whitespace). Strip trailing noise + member-count parens
+ * so the same chat collapses to one key. Chinese OCR substitutions (盈↔圖) can
+ * still split a chat; acceptable — Sung reconciles at blocklist time.
+ */
+export function normalizeChatName(name) {
+  return (name || '')
+    .replace(/[（(]\s*[^）)]*[）)]\s*$/u, '') // trailing (500)/(garbled) member count
+    .replace(/[\s.．。・•·⋯…‥、,，:：以]+$/u, '') // trailing OCR bleed
+    .replace(/[×✕Xx]/g, 'x') // unify Deepwave "×/X/x 夥伴" separators
+    .replace(/[\s_]+/g, ' ')
+    .toLowerCase()
+    .trim();
+}
+
+/**
  * Enumerate the FULL chatroom name list by scrolling the sidebar top->bottom,
- * de-duplicating by name (first-seen order preserved). Returns names only;
- * coordinates are re-derived at click time because they go stale on scroll.
- * @returns {Promise<Array<{name:string}>>}
+ * de-duplicating by normalized name (first-seen order preserved; longest raw
+ * variant kept for display). Coordinates are re-derived at click time.
+ * @returns {Promise<Array<{name:string, key:string}>>}
  */
 export async function enumerateAllChats(wi, { maxPages = 40 } = {}) {
   await scrollToSidebarTop(wi);
-  const seen = new Set();
-  const ordered = [];
+  const byKey = new Map();
+  const order = [];
   let stalePages = 0;
   for (let page = 0; page < maxPages; page++) {
     const visible = await listSidebarChats(wi);
     let added = 0;
     for (const c of visible) {
-      if (!seen.has(c.name)) {
-        seen.add(c.name);
-        ordered.push({ name: c.name });
+      const key = normalizeChatName(c.name);
+      if (!key) continue;
+      if (!byKey.has(key)) {
+        byKey.set(key, c.name);
+        order.push(key);
         added++;
+      } else if (c.name.length > byKey.get(key).length) {
+        byKey.set(key, c.name); // keep the fullest OCR variant for display
       }
     }
     stalePages = added === 0 ? stalePages + 1 : 0;
     if (stalePages >= 2) break; // two full pages with nothing new = reached bottom
     await scrollSidebar(wi, -6); // scroll down one page
   }
-  return ordered;
+  return order.map((key) => ({ key, name: byKey.get(key) }));
 }
 
 /**
