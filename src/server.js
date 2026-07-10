@@ -19,6 +19,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { LineAutomation } from './automation/line-automation.js';
+import {
+  ensureLineForeground,
+  readChatMessages,
+  withFocusRestore,
+  fingerprint,
+} from './scan/scan-engine.js';
 
 // 取得當前模組的目錄路徑
 const __filename = fileURLToPath(import.meta.url);
@@ -169,7 +175,7 @@ class LineDesktopMCPServer {
         tools: [
           {
             name: 'get_line_chatroom_history_default',
-            description: 'Read recent messages from a specific LINE chat/group and return them as STRUCTURED JSON (array of {sender,time,text,raw}). Non-hijacking: reads the macOS Accessibility tree only — it does NOT move the mouse, type keystrokes, or touch the clipboard, so the user can keep working. Requires an OPEN LINE main window (a minimized/menu-bar-only LINE returns a clear error). Use when the amount of data to read is uncertain.',
+            description: 'Read recent messages from a specific LINE chat/group and return them as STRUCTURED JSON (array of {sender,time,text,raw}). On macOS this uses foreground screenshot + Apple Vision OCR (this LINE build does NOT expose message text to the Accessibility tree). It briefly brings LINE to the foreground, moves the mouse to click the chat, then restores your previous frontmost app and cursor when done. Requires an OPEN LINE main window and Screen Recording permission. Use when the amount of data to read is uncertain.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -192,7 +198,7 @@ class LineDesktopMCPServer {
           },
           {
             name: 'get_line_chatroom_history_long',
-            description: 'Read messages from a specific LINE chat/group as STRUCTURED JSON, scrolling up further (more AX scroll rounds) to load older history for summarizing/analyzing a longer period. Non-hijacking (AX-only: no mouse/keystroke/clipboard). Requires an OPEN LINE main window.',
+            description: 'Read messages from a specific LINE chat/group as STRUCTURED JSON, scrolling up further (more OCR passes) to load older history for summarizing/analyzing a longer period. macOS path: foreground screenshot + Apple Vision OCR; restores your previous frontmost app + cursor when done. Requires an OPEN LINE main window and Screen Recording permission.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -215,7 +221,7 @@ class LineDesktopMCPServer {
           },
           {
             name: 'get_line_chatroom_history_short',
-            description: 'Read only the most recent few messages of a specific LINE chat/group as STRUCTURED JSON, for a quick response. Non-hijacking (AX-only: no mouse/keystroke/clipboard). Requires an OPEN LINE main window.',
+            description: 'Read only the most recent few messages of a specific LINE chat/group as STRUCTURED JSON, for a quick response. macOS path: a single foreground screenshot + Apple Vision OCR; restores your previous frontmost app + cursor when done. Requires an OPEN LINE main window and Screen Recording permission.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -312,12 +318,43 @@ class LineDesktopMCPServer {
     });
   }
 
-  // Shared: structured, non-hijacking read. scanDepth = AX scroll-up rounds.
+  // Shared structured read. scanDepth = how much older history to load.
+  // macOS: foreground screenshot + Apple Vision OCR (this LINE build hides
+  // message text from the Accessibility tree). Other platforms keep the legacy
+  // clipboard-based automation path.
   async readHistory(args, scanDepth) {
     const { chatName, date, messageLimit = 100 } = args;
     const targetDate = date || new Date().toISOString().split('T')[0];
 
-    const result = await this.lineAutomation.getChatHistory(chatName, targetDate, messageLimit, scanDepth);
+    let result;
+    if (process.platform === 'darwin') {
+      // map legacy scanDepth (0/3/12) to OCR scroll-up passes.
+      const scrollRounds = scanDepth <= 0 ? 0 : scanDepth >= 12 ? 6 : 2;
+      const messages = await withFocusRestore(async () => {
+        const wi = await ensureLineForeground();
+        const msgs = await readChatMessages(chatName, wi, { scrollRounds });
+        // de-dup defensively (multi-pass OCR can overlap) and cap to messageLimit.
+        const seen = new Set();
+        const uniq = [];
+        for (const m of msgs) {
+          const fp = fingerprint(m);
+          if (seen.has(fp)) continue;
+          seen.add(fp);
+          uniq.push(m);
+        }
+        return uniq.slice(Math.max(0, uniq.length - messageLimit));
+      });
+      result = {
+        chatName,
+        date: targetDate,
+        order: 'top-to-bottom (oldest first)',
+        via: 'screenshot+ocr',
+        messageCount: messages.length,
+        messages,
+      };
+    } else {
+      result = await this.lineAutomation.getChatHistory(chatName, targetDate, messageLimit, scanDepth);
+    }
 
     return {
       content: [
