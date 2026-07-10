@@ -49,10 +49,34 @@ export async function loadBlocklist() {
   };
 }
 
-/** Filter enumerated chats by the blocklist. Returns the kept chats. */
+// Light normalizer for blocklist matching (mirrors scan-engine.normalizeChatName;
+// duplicated here to avoid a circular import). Lowercases, strips member-count
+// parens / trailing OCR bleed, unifies ×/x separators & spaces.
+function normForMatch(name) {
+  return (name || '')
+    .replace(/[（(]\s*[^）)]*[）)]\s*$/u, '')
+    .replace(/[\s.．。・•·⋯…‥、,，:：以]+$/u, '')
+    .replace(/[×✕Xx]/g, 'x')
+    .replace(/[\s_]+/g, ' ')
+    .toLowerCase()
+    .trim();
+}
+
+/**
+ * Filter enumerated chats by the blocklist. An excludeNames entry is treated as a
+ * substring pattern: a chat is dropped if any (normalized) exclude entry is
+ * contained in the (normalized) chat name. This tolerates OCR variance, member
+ * counts, and lets short keywords (e.g. "華南銀行") match longer chat titles.
+ * Returns the kept chats.
+ */
 export function applyBlocklist(chats, blocklist) {
-  const excl = new Set(blocklist.excludeNames || []);
-  return chats.filter((c) => !excl.has(c.name));
+  const patterns = (blocklist.excludeNames || [])
+    .map(normForMatch)
+    .filter(Boolean);
+  return chats.filter((c) => {
+    const n = normForMatch(c.name);
+    return !patterns.some((p) => n.includes(p));
+  });
 }
 
 /**
