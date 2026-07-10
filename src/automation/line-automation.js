@@ -46,8 +46,13 @@ export class LineAutomation {
    */
   async getChatHistory(chatName, date, messageLimit = 100, scanDepth = 0) {
     if (this.platform !== 'darwin') {
-      // Windows path unchanged; delegate to its own implementation if present.
-      return await this.automation.getChatHistory(chatName, date, messageLimit, scanDepth);
+      // Windows path: keep the original clipboard-based flow (unchanged behavior).
+      await this.automation.switchToEnglish();
+      await this.automation.activateLine();
+      const ok = await this.automation.selectChat(chatName);
+      if (!ok) throw new Error(`Chat "${chatName}" not found`);
+      await this.automation.pageUp(scanDepth);
+      return await this.automation.copyAllChatToClipboard();
     }
 
     // 1) Cold-start / readiness: poll process + window (distinct errors), no activate.
