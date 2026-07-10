@@ -18,11 +18,13 @@ echo "已建立中止哨兵：$SENTINEL"
 echo "掃描將在下一個檢查點停止並還原游標/焦點（通常 <1s）。"
 
 # Grace period for the graceful stop, then pkill anything still alive.
+# Pattern anchors on the node invocation ("node …scripts/scan-*.js") so an editor
+# or pager that merely has the filename in argv (vim/less scan-once.js) is never matched.
 sleep 3
-if pgrep -f 'scan-once\.js|scan-daemon\.js' >/dev/null 2>&1; then
+PAT='node .*scripts/scan-(once|daemon)\.js'
+if pgrep -f "$PAT" >/dev/null 2>&1; then
   echo "仍偵測到掃描程序，pkill 收尾…"
-  pkill -f 'scan-once\.js' 2>/dev/null || true
-  pkill -f 'scan-daemon\.js' 2>/dev/null || true
+  pkill -f "$PAT" 2>/dev/null || true
   echo "（pkill fallback：程序若在 pkill 前被殺，游標已由 graceful 路徑還原；"
   echo "  若由 pkill 殺掉，請手動移動一下滑鼠即可，LINE 仍在前景。）"
 else

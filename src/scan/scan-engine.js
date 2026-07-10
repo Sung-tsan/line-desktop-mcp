@@ -572,6 +572,11 @@ export async function withFocusRestore(fn) {
   // Seed the activity guard with the user's cursor at entry: checkpoint #1 already
   // compares live cursor vs this baseline, so a scan that starts while the user is
   // moving the mouse trips the guard immediately instead of after the first scroll.
+  if (!prevCursor) {
+    process.stderr.write(
+      '警告：讀不到游標位置（cliclick p 失敗）——本次執行的「使用者活動偵測」失效，僅剩 watchdog/哨兵保護。\n'
+    );
+  }
   getScanControl().recordCursor(prevCursor);
   try {
     return await fn();
