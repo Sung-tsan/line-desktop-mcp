@@ -25,7 +25,9 @@ import { STATE_DIR, OUT_DIR } from './state.js';
 
 const DIKW_CONFIG_PATH = join(STATE_DIR, 'dikw.json');
 const OUTBOX_PATH = join(STATE_DIR, 'outbox.json');
-const PUSH_TIMEOUT_MS = 15000;
+// 60s：server 端首次大量回填(逐則寫 Notion)可能跑很久;誤判逾時會讓 outbox 空轉。
+// server 端有去重,重送無害,但 timeout 仍應蓋過正常處理時間。可由 config 覆蓋。
+const DEFAULT_PUSH_TIMEOUT_MS = 60000;
 const MAX_ATTEMPTS = 10;
 
 async function readJson(path, fallback) {
@@ -58,7 +60,9 @@ export async function loadDikwConfig() {
     );
     return null;
   }
-  return { url: url.replace(/\/+$/, ''), token };
+  const timeoutMs =
+    Number(process.env.DIKW_INGEST_TIMEOUT_MS) || Number(file.timeoutMs) || DEFAULT_PUSH_TIMEOUT_MS;
+  return { url: url.replace(/\/+$/, ''), token, timeoutMs };
 }
 
 /**
@@ -70,8 +74,9 @@ export async function loadDikwConfig() {
  *   { status: 'error', message }                        -- retryable (network/timeout/5xx/other)
  */
 export async function pushScan(scan, config) {
+  const timeoutMs = config.timeoutMs || DEFAULT_PUSH_TIMEOUT_MS;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PUSH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${config.url}/api/ingest/line`, {
       method: 'POST',
@@ -100,7 +105,7 @@ export async function pushScan(scan, config) {
     }
     return { status: 'error', message: `HTTP ${res.status}: ${body?.error || body?.raw || text || '(no body)'}` };
   } catch (e) {
-    const msg = e?.name === 'AbortError' ? `逾時（>${PUSH_TIMEOUT_MS}ms）` : e?.message || String(e);
+    const msg = e?.name === 'AbortError' ? `逾時（>${timeoutMs}ms）` : e?.message || String(e);
     return { status: 'error', message: msg };
   } finally {
     clearTimeout(timer);
