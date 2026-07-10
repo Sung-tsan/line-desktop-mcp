@@ -382,41 +382,97 @@ async function locateChat(name, wi, { maxPages = 40 } = {}) {
  *   - raw is always preserved so nothing is silently lost.
  * order: oldest -> newest (top -> bottom), matching OCR sort order.
  */
-export function parseMessagesFromOcr(msgLines) {
+const isTimeLine = (t) => TIME_RE.test(t) && t.trim().length <= 12;
+// System separators LINE renders inside the message stream (not real messages).
+const SYSTEM_LINES = [/^以下為尚未閱讀的訊息$/, /^尚未讀取的訊息$/, /^\d{4}[/年]\d{1,2}[/月]\d{1,2}/];
+
+/**
+ * Parse message-area OCR into {sender,time,text,raw}. Spatial model measured from
+ * live LINE group chats:
+ *   - fragments on the same baseline (Δy ≤ 0.6·avgH) are one logical line;
+ *   - the sender name sits at the far-left margin, short & narrow, above its bubble;
+ *   - a message's text lines share that left margin (others) or sit right-of-center
+ *     (x > 50% width = my own messages, no sender);
+ *   - a timestamp (右側 HH:MM) closes the current bubble.
+ * Consecutive same-sender bubbles inherit the last seen sender (LINE only draws it
+ * once); own (right-aligned) bubbles reset sender to null. raw always preserved.
+ * order: oldest -> newest.
+ * @param {Array} msgLines OCR lines already filtered to the message column
+ * @param {number} ocrWidth OCR image width (for x-fraction thresholds)
+ */
+export function parseMessagesFromOcr(msgLines, ocrWidth = 0) {
   if (!msgLines.length) return [];
-  const sorted = [...msgLines].sort((a, b) => a.y - b.y);
+
+  // 1) merge same-baseline fragments into one logical line
+  const sorted = [...msgLines].sort((a, b) => a.y - b.y || a.x - b.x);
   const avgH = sorted.reduce((s, l) => s + (l.h || 0), 0) / sorted.length || 20;
-  const gapThreshold = avgH * 1.8;
-
-  const groups = [];
-  let cur = [sorted[0]];
-  for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i].y - sorted[i - 1].y > gapThreshold) {
-      groups.push(cur);
-      cur = [];
-    }
-    cur.push(sorted[i]);
+  const rows = [];
+  for (const l of sorted) {
+    const last = rows[rows.length - 1];
+    if (last && Math.abs(l.y - last.y) <= avgH * 0.6) last.parts.push(l);
+    else rows.push({ y: l.y, parts: [l] });
   }
-  if (cur.length) groups.push(cur);
+  const merged = rows
+    .map((r) => {
+      const parts = r.parts.sort((a, b) => a.x - b.x);
+      return {
+        x: Math.min(...parts.map((p) => p.x)),
+        y: r.y,
+        w: parts.reduce((s, p) => s + (p.w || 0), 0),
+        text: parts.map((p) => p.text.trim()).filter(Boolean).join(' '),
+      };
+    })
+    .filter((m) => {
+      const t = m.text.trim();
+      if (!t) return false;
+      if (/^[<>«»‹›^v\\/|~•·．。、，,:：;；\-—_=+*#()（）\[\]{}]+$/u.test(t)) return false; // symbol junk
+      return !SYSTEM_LINES.some((re) => re.test(t));
+    });
+  if (!merged.length) return [];
 
-  return groups.map((g) => {
-    const raw = g.map((l) => l.text.trim()).filter(Boolean);
-    let time = null;
-    const rest = [];
-    for (const t of raw) {
-      if (!time && TIME_RE.test(t) && t.length <= 12) time = t.match(TIME_RE)[0].trim();
-      else rest.push(t);
+  // 2) geometry: left margin (sender/other column) and own-message threshold
+  const W = ocrWidth || Math.max(...merged.map((m) => m.x + m.w), 1);
+  const nonTime = merged.filter((m) => !isTimeLine(m.text));
+  const leftMargin = nonTime.length ? Math.min(...nonTime.map((m) => m.x)) : 0;
+  const senderMaxX = leftMargin + W * 0.06;
+  const ownMinX = W * 0.5;
+
+  // 3) walk into bubbles
+  const out = [];
+  let curr = null;
+  let lastSender = null;
+  const flush = () => {
+    if (curr && (curr.textLines.length || curr.time)) {
+      out.push({ sender: curr.sender, time: curr.time, text: curr.textLines.join('\n'), raw: curr.raw });
     }
-    let sender = null;
-    let text;
-    if (rest.length >= 2 && rest[0].length <= 20) {
-      sender = rest[0];
-      text = rest.slice(1).join('\n');
-    } else {
-      text = rest.join('\n');
+    curr = null;
+  };
+  for (const m of merged) {
+    const t = m.text.trim();
+    if (isTimeLine(t)) {
+      if (!curr) curr = { sender: lastSender, time: null, textLines: [], raw: [] };
+      curr.time = (t.match(TIME_RE) || [t])[0].trim();
+      curr.raw.push(t);
+      flush();
+      continue;
     }
-    return { sender, time, text, raw };
-  }).filter((m) => m.text || m.raw.length);
+    const isSender = m.x <= senderMaxX && t.length <= 20 && m.w < W * 0.22;
+    if (isSender) {
+      flush();
+      lastSender = t;
+      curr = { sender: t, time: null, textLines: [], raw: [t] };
+      continue;
+    }
+    const isOwn = m.x > ownMinX;
+    if (!curr) curr = { sender: isOwn ? null : lastSender, time: null, textLines: [], raw: [] };
+    if (isOwn) curr.sender = null;
+    curr.textLines.push(t);
+    curr.raw.push(t);
+  }
+  flush();
+  // keep only bubbles with actual text; a pure-timestamp bubble (image/sticker,
+  // no OCR text) carries nothing for a text digest.
+  return out.filter((m) => m.text && m.text.trim());
 }
 
 /** Scroll the message area up one screenful to reveal older messages. */
@@ -446,8 +502,12 @@ export async function readChatMessages(chat, wi, { scrollRounds = 0 } = {}) {
     if (round > 0) await scrollMsgAreaUp(wi);
     const o = await captureOcr(wi);
     const minX = o.width * MSGAREA_MIN_X_FRAC;
-    const msgLines = (o.lines || []).filter((l) => l.x > minX);
-    passes.push(parseMessagesFromOcr(msgLines));
+    // drop the top header bar (chat title / search box / back button) and the
+    // bottom input box; real messages begin well below ~11% (measured live).
+    const topCut = o.height * 0.11;
+    const botCut = o.height * 0.92;
+    const msgLines = (o.lines || []).filter((l) => l.x > minX && l.y > topCut && l.y < botCut);
+    passes.push(parseMessagesFromOcr(msgLines, o.width));
   }
 
   // passes[0] = current (newest) screen; later passes are older (scrolled up).

@@ -20,3 +20,9 @@ native/launchd/cc.linescan.local.plist
 # logs
 logs/
 *.log
+src/scan/state/blocklist.json
+src/scan/state/seen-chats.json
+src/scan/state/last-scan.json
+src/scan/state/chatlist-snapshot.txt
+src/scan/state/out/*
+!src/scan/state/out/.gitkeep
