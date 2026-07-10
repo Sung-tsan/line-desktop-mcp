@@ -131,7 +131,7 @@ class LineDesktopMCPServer {
     this.server = new Server(
       {
         name: 'line-desktop-mcp',
-        version: '1.0.0',
+        version: '1.2.0-ax.1',
       },
       {
         capabilities: {
@@ -169,21 +169,21 @@ class LineDesktopMCPServer {
         tools: [
           {
             name: 'get_line_chatroom_history_default',
-            description: 'Extract conversation history from a specific LINE group chat or individual chat, when the amount of data to be read is uncertain, always use this function.',
+            description: 'Read recent messages from a specific LINE chat/group and return them as STRUCTURED JSON (array of {sender,time,text,raw}). Non-hijacking: reads the macOS Accessibility tree only — it does NOT move the mouse, type keystrokes, or touch the clipboard, so the user can keep working. Requires an OPEN LINE main window (a minimized/menu-bar-only LINE returns a clear error). Use when the amount of data to read is uncertain.',
             inputSchema: {
               type: 'object',
               properties: {
                 chatName: {
                   type: 'string',
-                  description: 'Name of the chat/group to extract history from',
+                  description: 'Name of the chat/group to read from',
                 },
                 date: {
                   type: 'string',
-                  description: 'Date to extract history for (YYYY-MM-DD format, defaults to today)',
+                  description: 'Date label to tag the result with (YYYY-MM-DD format, defaults to today)',
                 },
                 messageLimit: {
                   type: 'number',
-                  description: 'Maximum number of messages to extract (default: 100)',
+                  description: 'Maximum number of messages to return (default: 100)',
                   default: 100,
                 },
               },
@@ -192,21 +192,21 @@ class LineDesktopMCPServer {
           },
           {
             name: 'get_line_chatroom_history_long',
-            description: 'Extract conversation history from a specific LINE group chat or individual chat, when a more complete set of content is needed, such as for summarizing or analyzing data over a period of time.',
+            description: 'Read messages from a specific LINE chat/group as STRUCTURED JSON, scrolling up further (more AX scroll rounds) to load older history for summarizing/analyzing a longer period. Non-hijacking (AX-only: no mouse/keystroke/clipboard). Requires an OPEN LINE main window.',
             inputSchema: {
               type: 'object',
               properties: {
                 chatName: {
                   type: 'string',
-                  description: 'Name of the chat/group to extract history from',
+                  description: 'Name of the chat/group to read from',
                 },
                 date: {
                   type: 'string',
-                  description: 'Date to extract history for (YYYY-MM-DD format, defaults to today)',
+                  description: 'Date label to tag the result with (YYYY-MM-DD format, defaults to today)',
                 },
                 messageLimit: {
                   type: 'number',
-                  description: 'Maximum number of messages to extract (default: 100)',
+                  description: 'Maximum number of messages to return (default: 100)',
                   default: 100,
                 },
               },
@@ -215,7 +215,7 @@ class LineDesktopMCPServer {
           },
           {
             name: 'get_line_chatroom_history_short',
-            description: 'Extract conversation history from a specific LINE group chat or individual chat, when a quick response is needed, only retrieve the most recent few messages.',
+            description: 'Read only the most recent few messages of a specific LINE chat/group as STRUCTURED JSON, for a quick response. Non-hijacking (AX-only: no mouse/keystroke/clipboard). Requires an OPEN LINE main window.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -256,7 +256,7 @@ class LineDesktopMCPServer {
           },
           {
             name: 'send_message_auto',
-            description: 'Send a message to a specific LINE chat or group. Sends immediately with no pre-send review in LINE. Use this only if the user explicitly requests immediate sending; otherwise, do not call this function',
+            description: 'Send a message to a specific LINE chat/group and press Enter immediately (no pre-send review). SAFETY GATE: disabled by default; it returns an error unless the environment variable LINE_MCP_ALLOW_AUTO_SEND=true is set. Use only when the user explicitly requests immediate auto-sending.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -312,84 +312,41 @@ class LineDesktopMCPServer {
     });
   }
 
-  async handleGetLineChatroomHistoryDefault(args) {
+  // Shared: structured, non-hijacking read. scanDepth = AX scroll-up rounds.
+  async readHistory(args, scanDepth) {
     const { chatName, date, messageLimit = 100 } = args;
     const targetDate = date || new Date().toISOString().split('T')[0];
 
-    const history = await this.lineAutomation.getChatHistory(chatName, targetDate, messageLimit, 10);
-    
-   // Ensure history is a string and handle null/undefined cases
-   // 限制回應內容長度，避免傳輸問題
-   const historyText = (history || '').slice(-50000); // 限制 50KB, 由後往前截取
-    
+    const result = await this.lineAutomation.getChatHistory(chatName, targetDate, messageLimit, scanDepth);
+
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify({
-            chatName: chatName,
-            date: targetDate,
-            messageLimit: messageLimit,
-            history: historyText,
-            chatRoomUpdatedAt: new Date().toLocaleString()
-          }, null, 2),
-        }
+          text: JSON.stringify(
+            {
+              ...result,
+              messageLimit,
+              chatRoomUpdatedAt: new Date().toLocaleString(),
+            },
+            null,
+            2
+          ),
+        },
       ],
     };
+  }
+
+  async handleGetLineChatroomHistoryDefault(args) {
+    return this.readHistory(args, 3);
   }
 
   async handleGetLineChatroomHistoryLong(args) {
-    const { chatName, date, messageLimit = 100 } = args;
-    const targetDate = date || new Date().toISOString().split('T')[0];
-
-    const history = await this.lineAutomation.getChatHistory(chatName, targetDate, messageLimit, 50);
-    
-   // Ensure history is a string and handle null/undefined cases
-   // 限制回應內容長度，避免傳輸問題
-   const historyText = (history || '').slice(-50000); // 限制 50KB, 由後往前截取
-    
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            chatName: chatName,
-            date: targetDate,
-            messageLimit: messageLimit,
-            history: historyText,
-            chatRoomUpdatedAt: new Date().toLocaleString(),
-          }, null, 2),
-        },
-      ],
-    };
+    return this.readHistory(args, 12);
   }
 
   async handleGetLineChatroomHistoryShort(args) {
-    const { chatName, date, messageLimit = 100 } = args;
-    const targetDate = date || new Date().toISOString().split('T')[0];
-
-    const history = await this.lineAutomation.getChatHistory(chatName, targetDate, messageLimit, 5);
-    
-   // Ensure history is a string and handle null/undefined cases
-   // 限制回應內容長度，避免傳輸問題
-   const historyText = (history || '').slice(-50000); // 限制 50KB, 由後往前截取
-    
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            chatName: chatName,
-            date: targetDate,
-            messageLimit: messageLimit,
-            history: historyText,
-            chatRoomUpdatedAt: new Date().toLocaleString(),
-          }, null, 2),
-        },
-      ],
-    };
+    return this.readHistory(args, 0);
   }
 
   async handleSendMessage(args) {
@@ -415,9 +372,32 @@ class LineDesktopMCPServer {
 
   async handleSendMessageAuto(args) {
     const { chatName, message } = args;
-    
+
+    // P5 safety gate: auto-send (immediate Enter) is disabled unless explicitly enabled.
+    if (process.env.LINE_MCP_ALLOW_AUTO_SEND !== 'true') {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: false,
+                chatName,
+                message,
+                timestamp: new Date().toISOString(),
+                error:
+                  'auto-send 已停用（安全閘）。若確定要讓訊息在無人確認下立即送出，請設環境變數 LINE_MCP_ALLOW_AUTO_SEND=true 後重試；否則請改用 send_message_manual（會停在 LINE 讓人按送出）。',
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
     const result = await this.lineAutomation.sendChatMessage(chatName, message,  true);
-    
+
     return {
       content: [
         {
