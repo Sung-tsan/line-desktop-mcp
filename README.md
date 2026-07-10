@@ -10,7 +10,15 @@ This is a **fork of [dtwang/line-desktop-mcp](https://github.com/dtwang/line-des
 by Geoffrey Wang, kept under the original **MIT License** (see [LICENSE.md](LICENSE.md);
 copyright remains with the original author). All upstream functionality is
 preserved; this fork adds a macOS reading path and an idle-aware scheduler, and
-hardens a handful of automation bugs.
+hardens a handful of automation bugs. Fork maintained by
+**Sung Yeh ([@Sung-tsan](https://github.com/Sung-tsan))**.
+
+> **Installing this fork (not the upstream npm package):** the macOS OCR/idle
+> features below live in *this repository only* — they are **not** published to
+> npm. `npx line-desktop-mcp@latest` pulls Geoffrey Wang's upstream package, which
+> does not include them. To use this fork, **clone this repo, run
+> `bash native/build.sh`, and point your MCP client at `node <path>/src/server.js`**
+> (see the macOS install section).
 
 ### Why this fork
 
@@ -184,30 +192,37 @@ LINE Desktop MCP 是一個基於 Model Context Protocol 的整合工具，讓 AI
 }
 ```
 
-#### macOS
+#### macOS（本 fork 的 OCR／閒置排程功能）
 
-1. **安裝 Node.js**
-   - 使用 Homebrew：`brew install node`
-   - 或從官網下載：https://nodejs.org/
+> ⚠️ `npx line-desktop-mcp@latest` 會裝到**上游 npm 套件**，不含本 fork 的 OCR／
+> 閒置排程。請改用下面的 clone + 本地路徑方式。
 
-2. **（選擇性）安裝 cliclick**
-   - 如果有安裝 Homebrew，會於啟動時自動安裝
-   - 或手動安裝：`brew install cliclick`
+1. **安裝 Node.js 與 cliclick**
+   - `brew install node cliclick`
 
-3. **設定 Claude Desktop**
-   - 開啟 Claude Desktop 設定檔
-   - 在 `mcpServers` 中加入以下設定：
+2. **Clone 並建置原生工具**
+   ```bash
+   git clone https://github.com/Sung-tsan/line-desktop-mcp.git
+   cd line-desktop-mcp && npm install && bash native/build.sh
+   ```
+
+3. **設定 Claude Desktop**（指向本地 fork，非 npx）
+   - 開啟 Claude Desktop 設定檔，在 `mcpServers` 中加入：
 
 ```json
 {
   "mcpServers": {
     "line-desktop-mcp": {
-      "command": "npx",
-      "args": ["line-desktop-mcp@latest"]
+      "command": "node",
+      "args": ["/絕對路徑/line-desktop-mcp/src/server.js"]
     }
   }
 }
 ```
+
+4. **授予「螢幕錄製」權限**（系統設定 › 隱私權與安全性），OCR 讀取與排程掃描皆需要。
+
+macOS 的截圖＋OCR 掃描與閒置排程用法，見上方英文 **Usage (macOS OCR scan)** 段。
 
 ### 進階設定
 
@@ -299,9 +314,12 @@ Claude 會撰寫訊息並自動完成發送動作。
 
 ### 作者
 
-**Geoffrey Wang**
+**Geoffrey Wang** — original author
 - GitHub: [@dtwang](https://github.com/dtwang)
 - Threads: [@geoff_spacetime](https://www.threads.com/@geoff_spacetime)
+
+**Sung Yeh** — fork maintainer (macOS OCR / idle-scheduler)
+- GitHub: [@Sung-tsan](https://github.com/Sung-tsan)
 
 ---
 
@@ -390,30 +408,37 @@ LINE Desktop MCP is an integration tool based on the Model Context Protocol that
 }
 ```
 
-#### macOS
+#### macOS (this fork's OCR / idle-scheduling features)
 
-1. **Install Node.js**
-   - Using Homebrew: `brew install node`
-   - Or download from: https://nodejs.org/
+> ⚠️ `npx line-desktop-mcp@latest` installs the **upstream npm package**, which
+> does **not** include this fork's OCR / idle scheduler. Use the clone + local
+> path below instead.
 
-2. **(Optional) Install cliclick**
-   - If Homebrew is installed, it will be automatically installed on startup
-   - Or install manually: `brew install cliclick`
+1. **Install Node.js and cliclick**
+   - `brew install node cliclick`
 
-3. **Configure Claude Desktop**
-   - Open Claude Desktop configuration file
-   - Add the following to `mcpServers`:
+2. **Clone and build the native helpers**
+   ```bash
+   git clone https://github.com/Sung-tsan/line-desktop-mcp.git
+   cd line-desktop-mcp && npm install && bash native/build.sh
+   ```
+
+3. **Configure Claude Desktop** (point at the local fork, not npx)
+   - Open the Claude Desktop config file and add to `mcpServers`:
 
 ```json
 {
   "mcpServers": {
     "line-desktop-mcp": {
-      "command": "npx",
-      "args": ["line-desktop-mcp@latest"]
+      "command": "node",
+      "args": ["/absolute/path/line-desktop-mcp/src/server.js"]
     }
   }
 }
 ```
+
+4. **Grant Screen Recording permission** (System Settings › Privacy & Security) —
+   required for OCR reading and scheduled scans. See **Usage (macOS OCR scan)** above.
 
 ### Advanced Configuration
 
@@ -505,6 +530,9 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 
 ### Author
 
-**Geoffrey Wang**
+**Geoffrey Wang** — original author
 - GitHub: [@dtwang](https://github.com/dtwang)
 - Threads: [@geoff_spacetime](https://www.threads.com/@geoff_spacetime)
+
+**Sung Yeh** — fork maintainer (macOS OCR / idle-scheduler)
+- GitHub: [@Sung-tsan](https://github.com/Sung-tsan)
