@@ -13,6 +13,7 @@ src/scan/state/last-scan.json
 src/scan/state/chatlist-snapshot.txt
 src/scan/state/out/*
 !src/scan/state/out/.gitkeep
+src/scan/state/ABORT
 
 # DIKW push config (contains bearer token) and offline retry queue
 src/scan/state/dikw.json

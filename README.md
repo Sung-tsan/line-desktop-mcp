@@ -105,6 +105,51 @@ scripts/install-schedule.sh install     # status | uninstall
 The three MCP read tools (`get_line_chatroom_history_*`) are rerouted to this
 screenshot+OCR engine on macOS; their names and parameters are unchanged.
 
+### 安全機制（Scanner safety — abort / watchdog / activity guard）
+
+The scan drives your real cursor (clicks + scrolls LINE). To make sure it can
+**never** hijack the mouse again, every dangerous step (screenshot / click /
+scroll) passes a mandatory checkpoint. These guards run in **every** mode —
+including `--force` and the launchd daemon; `--force` only skips the *startup*
+idle check, never the mid-run guards.
+
+**Abort a running scan (stop it now):**
+
+```bash
+scripts/scan-abort.sh          # touches src/scan/state/ABORT, then pkill fallback
+# or by hand:
+touch src/scan/state/ABORT     # scan stops at its next checkpoint (<1s), restores cursor
+pkill -f scan-once.js          # last-resort hard kill
+```
+
+The sentinel file is auto-deleted when the next scan starts, so a stale `ABORT`
+can't wedge the following run.
+
+**Layered watchdog** (all overridable via env or unchanged sane defaults):
+
+| Limit | Env var | Default |
+|---|---|---|
+| Whole-sweep ceiling | `SCAN_TOTAL_MS` | 600000 (10 min) |
+| Sidebar-enumeration stage | `SCAN_ENUM_MS` | 90000 (90 s) |
+| Single chatroom read (incl. locate) | `SCAN_CHAT_MS` | 30000 (30 s) |
+| Scroll iterations per stage (hard cap) | `SCAN_SCROLL_MAX` | 60 |
+| Cursor-movement tolerance | `SCAN_CURSOR_TOL_PX` | 10 px |
+| Progress line every N scrolls | `SCAN_PROGRESS_EVERY` | 5 |
+
+**Mid-run activity detection.** `cliclick`'s synthetic events reset the system
+HID idle timer, so idle time is useless once a scan is running. Instead, after
+every click/scroll the scanner records where it parked the cursor; before the
+next step it re-reads the live cursor (`cliclick p`, read-only) and, if it moved
+more than the tolerance, treats it as "the user is back" and aborts.
+
+**On any abort** (sentinel, a watchdog trip, or detected activity) the scan
+restores your cursor + frontmost app, **writes and pushes whatever it already
+read** (partial success beats losing everything), logs `⚠ watchdog 中止於階段 …`,
+and exits non-zero. Enumeration/total aborts stop the whole sweep; a single
+chatroom's own timeout just skips that room and continues.
+
+Fast-loop unit tests for these guards (no GUI): `node --test test/scan-control.test.js`.
+
 ### DIKW 串接（推送到 DIKW pipeline）
 
 每次 `scripts/scan-once.js` 完成掃描、寫完 `state/out/scan-*.json` 後，會嘗試把這次

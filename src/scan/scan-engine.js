@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { unlink } from 'node:fs/promises';
 
 import { osa } from '../automation/macos-line-automation.js';
+import { getScanControl } from './scan-control.js';
 
 const execFileP = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -162,6 +163,7 @@ export async function ensureLineForeground({ timeoutMs = 6000, intervalMs = 300 
   const deadline = Date.now() + timeoutMs;
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    await getScanControl().checkpoint(); // honor abort/watchdog/activity even while waiting for the window
     const w = await readWinid();
     if (w) return w;
     if (Date.now() >= deadline) break;
@@ -192,6 +194,7 @@ export async function ocr(pngPath) {
 
 /** Capture + OCR the current LINE window in one step. */
 async function captureOcr(wi) {
+  await getScanControl().checkpoint(); // abort/watchdog/activity gate before every screenshot
   const png = await captureWindow(wi.wid);
   try {
     return await ocr(png);
@@ -287,8 +290,14 @@ function scrollScreenPoint(wi, col) {
 
 async function scrollSidebar(wi, lines) {
   // positive lines = up (toward top), negative = down (see native/scroll.swift)
+  const ctl = getScanControl();
+  await ctl.checkpoint(); // abort/watchdog/activity gate before every scroll
+  ctl.tickScroll(); // per-stage scroll-iteration hard cap
   const p = scrollScreenPoint(wi, 'sidebar');
   await execFileP(SCROLL_BIN, [String(p.x), String(p.y), String(lines)], { timeout: 6000 });
+  // scroll.swift warps the cursor to (p.x,p.y); record it so the activity guard
+  // compares the user's live cursor against where WE last parked it, not a stale point.
+  ctl.recordCursor(p);
   await sleep(250);
 }
 
@@ -320,28 +329,37 @@ export function normalizeChatName(name) {
  * @returns {Promise<Array<{name:string, key:string}>>}
  */
 export async function enumerateAllChats(wi, { maxPages = 40 } = {}) {
+  const ctl = getScanControl();
+  ctl.enterPhase('enumerate'); // starts the enumeration stage watchdog + scroll budget
   await scrollToSidebarTop(wi);
   const byKey = new Map();
   const order = [];
-  let stalePages = 0;
+  // Terminate on OCR-content stability: if two CONSECUTIVE pages show the exact
+  // same set of visible names, we've reached the bottom. (Watchdog + scroll cap +
+  // activity guard are the real safety net when the user is fighting the scroll —
+  // this heuristic only handles the normal, undisturbed case.)
+  let lastSig = null;
+  let sameStreak = 0;
   for (let page = 0; page < maxPages; page++) {
     const visible = await listSidebarChats(wi);
-    let added = 0;
     for (const c of visible) {
       const key = normalizeChatName(c.name);
       if (!key) continue;
       if (!byKey.has(key)) {
         byKey.set(key, c.name);
         order.push(key);
-        added++;
       } else if (c.name.length > byKey.get(key).length) {
         byKey.set(key, c.name); // keep the fullest OCR variant for display
       }
     }
-    stalePages = added === 0 ? stalePages + 1 : 0;
-    if (stalePages >= 2) break; // two full pages with nothing new = reached bottom
+    ctl.progress(`enumerate: page ${page + 1}, ${order.length} rooms so far`);
+    const sig = visible.map((c) => c.name).sort().join('|');
+    sameStreak = sig && sig === lastSig ? sameStreak + 1 : 0;
+    lastSig = sig;
+    if (sameStreak >= 1) break; // this page == previous page => two identical in a row => bottom
     await scrollSidebar(wi, -6); // scroll down one page
   }
+  ctl.progress(`enumerate done: ${order.length} rooms in ${Math.round(ctl.elapsedMs() / 1000)}s`);
   return order.map((key) => ({ key, name: byKey.get(key) }));
 }
 
@@ -477,8 +495,12 @@ export function parseMessagesFromOcr(msgLines, ocrWidth = 0) {
 
 /** Scroll the message area up one screenful to reveal older messages. */
 async function scrollMsgAreaUp(wi) {
+  const ctl = getScanControl();
+  await ctl.checkpoint();
+  ctl.tickScroll();
   const p = scrollScreenPoint(wi, 'msg');
   await execFileP(SCROLL_BIN, [String(p.x), String(p.y), '5'], { timeout: 6000 });
+  ctl.recordCursor(p); // scroll.swift warped the cursor here
   await sleep(600);
 }
 
@@ -493,8 +515,12 @@ async function scrollMsgAreaUp(wi) {
  */
 export async function readChatMessages(chat, wi, { scrollRounds = 0 } = {}) {
   const name = typeof chat === 'string' ? chat : chat.name;
+  const ctl = getScanControl();
+  ctl.enterPhase(`chat:${name}`); // per-chat watchdog (locate + read) + fresh scroll budget
   const loc = await locateChat(name, wi);
+  await ctl.checkpoint(); // gate before the click that opens the room
   await cliclick([`c:${loc.screenX},${loc.screenY}`]);
+  ctl.recordCursor({ x: loc.screenX, y: loc.screenY }); // cliclick parks the cursor at the click point
   await sleep(1000);
 
   const passes = [];
@@ -543,6 +569,10 @@ export function fingerprint(m) {
 export async function withFocusRestore(fn) {
   const prevApp = await getFrontApp();
   const prevCursor = await saveCursor();
+  // Seed the activity guard with the user's cursor at entry: checkpoint #1 already
+  // compares live cursor vs this baseline, so a scan that starts while the user is
+  // moving the mouse trips the guard immediately instead of after the first scroll.
+  getScanControl().recordCursor(prevCursor);
   try {
     return await fn();
   } finally {

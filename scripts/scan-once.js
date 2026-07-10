@@ -45,6 +45,7 @@ import {
   enqueueOutbox,
   flushOutbox,
 } from '../src/scan/push.js';
+import { initScanControl, isFatalAbort, ScanAbort } from '../src/scan/scan-control.js';
 
 function parseArgs(argv) {
   const cfg = { dry: false, idleMin: 5, force: false, help: false };
@@ -68,7 +69,17 @@ Usage: node scripts/scan-once.js [--dry] [--idle-min N] [--force]
   --idle-min N  Require >= N minutes idle before scanning (default 5).
                 Below the threshold the scan is skipped, so you are never
                 interrupted mid-work. Ignored with --dry.
-  --force       Scan even if idle is below the threshold.
+  --force       Skip ONLY the startup idle check. It does NOT disable the
+                mid-run safety guards (abort sentinel, total/stage/scroll
+                watchdog, live cursor-activity detection) — those always run.
+
+Safety (see README "安全機制" / scripts/scan-abort.sh):
+  Abort a running scan:   scripts/scan-abort.sh   (touches state/ABORT + pkill)
+  Timeouts (env overrides): SCAN_TOTAL_MS (600000) SCAN_ENUM_MS (90000)
+    SCAN_CHAT_MS (30000) SCAN_SCROLL_MAX (60) SCAN_CURSOR_TOL_PX (10)
+  Any of: sentinel set, a watchdog trips, or the user moves the mouse ->
+  the scan restores cursor/focus, writes+pushes partial results, exits != 0.
+
   -h, --help    Show this help.
 `;
 
@@ -120,9 +131,13 @@ async function main() {
   }
 
   await ensureDirs();
+  // Arm the safety spine (clears any stale ABORT sentinel from a prior aborted
+  // run). Guards run in EVERY mode — including --dry, --force and the daemon.
+  initScanControl();
   const blocklist = await loadBlocklist();
 
-  // idle gate (skip when the user is active) — never gates --dry.
+  // idle gate (skip when the user is active) — never gates --dry. --force skips
+  // ONLY this startup check; the mid-run guards below can never be bypassed.
   if (!cfg.dry && cfg.idleMin > 0 && !cfg.force) {
     const idle = await idleSeconds();
     if (idle < cfg.idleMin * 60) {
@@ -142,31 +157,48 @@ async function main() {
       return { dry: true, chats: all };
     }
 
-    const all = await enumerateAllChats(wi);
-    const names = all.map((c) => c.name);
-    const firstSeen = await updateSeenChats(names);
-    const kept = applyBlocklist(all, blocklist);
-
+    // Collected incrementally so a fatal mid-run abort still yields partial
+    // results (part success > losing everything).
     const chats = [];
-    for (const chat of kept) {
-      let newMessages = [];
-      let error = null;
-      try {
-        const msgs = await readChatMessages(chat, wi);
-        const withFp = msgs.map((m) => ({ ...m, fp: fingerprint(m) }));
-        const fresh = await diffAndRecord(chat.name, withFp);
-        newMessages = fresh.map(({ fp, ...m }) => m);
-      } catch (e) {
-        error = e?.message || String(e);
+    let enumerated = 0;
+    let aborted = null;
+    try {
+      const all = await enumerateAllChats(wi);
+      enumerated = all.length;
+      const names = all.map((c) => c.name);
+      const firstSeen = await updateSeenChats(names);
+      const kept = applyBlocklist(all, blocklist);
+
+      let i = 0;
+      for (const chat of kept) {
+        i += 1;
+        let newMessages = [];
+        let error = null;
+        try {
+          const msgs = await readChatMessages(chat, wi);
+          const withFp = msgs.map((m) => ({ ...m, fp: fingerprint(m) }));
+          const fresh = await diffAndRecord(chat.name, withFp);
+          newMessages = fresh.map(({ fp, ...m }) => m);
+          process.stderr.write(`[scan] read ${i}/${kept.length} ${chat.name}: +${newMessages.length}\n`);
+        } catch (e) {
+          // A fatal abort (sentinel / total timeout / user activity) must unwind
+          // the whole sweep — do NOT swallow it as a per-chat error.
+          if (isFatalAbort(e)) throw e;
+          error = e?.message || String(e);
+          process.stderr.write(`[scan] read ${i}/${kept.length} ${chat.name}: skipped (${error})\n`);
+        }
+        chats.push({
+          name: chat.name,
+          firstSeen: firstSeen.has(chat.name),
+          newMessages,
+          ...(error ? { error } : {}),
+        });
       }
-      chats.push({
-        name: chat.name,
-        firstSeen: firstSeen.has(chat.name),
-        newMessages,
-        ...(error ? { error } : {}),
-      });
+    } catch (e) {
+      if (!(e instanceof ScanAbort)) throw e; // real bug -> propagate
+      aborted = { reason: e.reason, phase: e.phase };
     }
-    return { dry: false, chats, enumerated: names.length, scanned: kept.length };
+    return { dry: false, chats, enumerated, scanned: chats.length, aborted };
   });
 
   if (result.dry) {
@@ -175,7 +207,9 @@ async function main() {
     return;
   }
 
+  // Write + push partial results even on abort (part success > total loss).
   const scan = { scannedAt: new Date().toISOString(), chats: result.chats };
+  if (result.aborted) scan.aborted = result.aborted;
   const stamp = ts();
   const jsonPath = join(OUT_DIR, `scan-${stamp}.json`);
   const mdPath = join(OUT_DIR, `line-daily-${stamp}.md`);
@@ -183,13 +217,24 @@ async function main() {
   await writeFile(mdPath, toMarkdown(scan), 'utf8');
 
   const totalNew = scan.chats.reduce((s, c) => s + c.newMessages.length, 0);
-  console.error(
-    `掃描完成：列舉 ${result.enumerated} 室、讀取 ${result.scanned} 室、新訊息 ${totalNew} 則。`
-  );
+  if (result.aborted) {
+    const { reason, phase } = result.aborted;
+    console.error(
+      `⚠ watchdog 中止於階段「${phase}」（原因：${reason}）。已還原游標/焦點，` +
+        `保留部分結果：列舉 ${result.enumerated} 室、已讀 ${result.scanned} 室、新訊息 ${totalNew} 則。`
+    );
+  } else {
+    console.error(
+      `掃描完成：列舉 ${result.enumerated} 室、讀取 ${result.scanned} 室、新訊息 ${totalNew} 則。`
+    );
+  }
   console.error(`  JSON: ${jsonPath}`);
   console.error(`  日報: ${mdPath}`);
 
   await pushToDikw(scan, jsonPath, totalNew);
+
+  // A watchdog/abort stop must surface as a non-zero exit (part results still saved).
+  if (result.aborted) process.exitCode = 1;
 }
 
 /**
