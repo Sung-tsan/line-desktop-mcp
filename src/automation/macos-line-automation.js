@@ -133,26 +133,30 @@ const COLLECT_TEXTS_HANDLER = `
 on collectTexts(el, depthLeft)
   set outList to {}
   if depthLeft is less than or equal to 0 then return outList
-  try
-    set v to value of el
-    if v is not missing value then
-      set vt to (v as text)
-      if vt is not "" then set end of outList to vt
-    end if
-  end try
-  try
-    set d to description of el
-    if d is not missing value then
-      set dt to (d as text)
-      if dt is not "" then set end of outList to dt
-    end if
-  end try
-  try
-    set kids to UI elements of el
-    repeat with k in kids
-      set outList to outList & (my collectTexts(k, depthLeft - 1))
-    end repeat
-  end try
+  tell application "System Events"
+    try
+      set v to value of el
+      if v is not missing value then
+        set vt to (v as text)
+        if vt is not "" then set end of outList to vt
+      end if
+    end try
+    try
+      set d to description of el
+      if d is not missing value then
+        set dt to (d as text)
+        if dt is not "" then set end of outList to dt
+      end if
+    end try
+    try
+      set kids to UI elements of el
+    on error
+      set kids to {}
+    end try
+  end tell
+  repeat with k in kids
+    set outList to outList & (my collectTexts(k, depthLeft - 1))
+  end repeat
   return outList
 end collectTexts
 `;
@@ -767,32 +771,35 @@ on dumpEl(el, depth, maxDepth)
     set pad to pad & "  "
   end repeat
   set roleStr to "?"
-  try
-    set roleStr to (role of el) as text
-  end try
   set nameStr to ""
-  try
-    if (name of el) is not missing value then set nameStr to (name of el) as text
-  end try
-  if nameStr is "" then
-    try
-      if (description of el) is not missing value then set nameStr to (description of el) as text
-    end try
-  end if
   set valStr to ""
-  try
-    if (value of el) is not missing value then set valStr to my trunc(value of el)
-  end try
+  set kids to {}
+  tell application "System Events"
+    try
+      set roleStr to (role of el) as text
+    end try
+    try
+      if (name of el) is not missing value then set nameStr to (name of el) as text
+    end try
+    if nameStr is "" then
+      try
+        if (description of el) is not missing value then set nameStr to (description of el) as text
+      end try
+    end if
+    try
+      if (value of el) is not missing value then set valStr to my trunc(value of el)
+    end try
+    if depth is less than maxDepth then
+      try
+        set kids to UI elements of el
+      end try
+    end if
+  end tell
   set gOut to gOut & pad & roleStr & " | " & nameStr & " | " & valStr & LF
   set gLines to gLines + 1
-  if depth is less than maxDepth then
-    try
-      set kids to UI elements of el
-      repeat with k in kids
-        my dumpEl(k, depth + 1, maxDepth)
-      end repeat
-    end try
-  end if
+  repeat with k in kids
+    my dumpEl(k, depth + 1, maxDepth)
+  end repeat
 end dumpEl
 
 tell application "System Events"
