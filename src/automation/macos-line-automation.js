@@ -118,7 +118,7 @@ function cascadeAS(varName, whichVar, candidates, testTemplate) {
     const test = testTemplate(c.expr);
     s += `if ${varName} is missing value then\n`;
     s += `  try\n`;
-    s += `    set _probe to (${test})\n`;
+    s += `    set probeVal to (${test})\n`;
     s += `    set ${varName} to (${c.expr})\n`;
     s += `    set ${whichVar} to "${c.label}"\n`;
     s += `  end try\n`;
@@ -743,6 +743,7 @@ end tell
     const rootCascade = cascadeAS('rootEl', 'whichRoot', rootCands, (e) => `(${e})`);
 
     const script = `
+global gLines, gMax, gOut, LF
 set US to (character id 31)
 set LF to (character id 10)
 set gLines to 0
@@ -759,6 +760,7 @@ on trunc(t)
 end trunc
 
 on dumpEl(el, depth, maxDepth)
+  global gLines, gMax, gOut, LF
   if gLines is greater than or equal to gMax then return
   set pad to ""
   repeat depth times
