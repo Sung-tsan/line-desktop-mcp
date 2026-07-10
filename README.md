@@ -4,6 +4,101 @@
 
 ---
 
+## 🍴 About this fork
+
+This is a **fork of [dtwang/line-desktop-mcp](https://github.com/dtwang/line-desktop-mcp)**
+by Geoffrey Wang, kept under the original **MIT License** (see [LICENSE.md](LICENSE.md);
+copyright remains with the original author). All upstream functionality is
+preserved; this fork adds a macOS reading path and an idle-aware scheduler, and
+hardens a handful of automation bugs.
+
+### Why this fork
+
+**1) Bug fixes contributed against the upstream GUI-automation path**
+
+- **osascript calls had no timeout.** If LINE was blocked by a modal/pop-up, an
+  unattended `osascript` could hang forever. Every AppleScript call now runs
+  through a single `osa()` wrapper with a hard timeout (`src/automation/macos-line-automation.js`).
+- **Chat selection wasn't verified.** Selecting a chat by name could silently
+  open the *wrong* room. Selection now reads back the opened chat's header and
+  aborts on mismatch, and the OCR path matches the sidebar row by exact name.
+- **`send_message_auto` had no guard** (a prompt-injection / accidental-send
+  risk for an agent-driven tool). It is now disabled by default behind the
+  `LINE_MCP_ALLOW_AUTO_SEND=true` environment gate (`src/server.js`).
+- **AppleScript pitfalls hardened:** identifiers must not start with an
+  underscore (`set _x …` raises compile error **-2741**), and a handler that
+  uses a top-level variable must declare it `global` on both sides — both are
+  easy to trip over and are avoided throughout the AppleScript in this fork.
+
+**2) New reading method — screenshot + OCR + idle-aware scheduling (macOS)**
+
+On newer macOS LINE builds, two hard facts make the classic approaches fail:
+
+- **Message text is self-drawn and never enters the Accessibility tree**
+  (`AXStaticText` values are empty), so AX cannot read message content. Upstream
+  reads by driving the clipboard (Cmd+A / Cmd+C), which steals focus, keyboard,
+  and the clipboard.
+- **LINE drops its onscreen window ~1 second after losing focus**, so *background*
+  screenshots are not possible either.
+
+This fork's macOS read path instead uses:
+
+- **Foreground screenshot + Apple Vision OCR** (excellent Traditional-Chinese
+  accuracy, **zero LLM tokens** for text extraction) — no clipboard hijack, no
+  keystrokes. Chat switching is done with a real click (`cliclick`) because
+  AXPress / set-selected do nothing on these sidebar rows.
+- **Idle-aware scheduling**: a launchd agent fires a few times a day, but the
+  runner *waits for you to be idle* (HID idle ≥ N minutes) before it scans, so it
+  never interrupts you mid-work.
+- **Cursor + focus restoration**: it snapshots the frontmost app and mouse
+  position before scanning and restores them afterward (even on error).
+
+> **Honest caveat:** this read path is **not** background or non-hijacking. To
+> capture, it briefly brings LINE to the foreground and moves the mouse to click
+> a chat; it just restores your app and cursor when done, and is idle-gated so it
+> only runs while you are away from the keyboard.
+
+### Limitations of the OCR/idle path
+
+- **macOS only** (uses Apple Vision, `screencapture`, `cliclick`, launchd). The
+  Windows path is unchanged from upstream.
+- Requires a **one-time Screen Recording permission**. For scheduled runs, the
+  `node` binary launchd spawns needs this permission *of its own* — granting it
+  to your terminal is not enough.
+- LINE must be **logged in**, in **expanded-chat-window** mode, with a window
+  that can be opened (not minimized to the menu bar), on the **primary display**.
+- **Pull-based, not real-time**: it reads on a schedule / on demand, not on push.
+- Sender/time separation from OCR is **best-effort heuristic**; the raw OCR lines
+  are always kept so nothing is silently lost.
+
+### Usage (macOS OCR scan)
+
+```bash
+# 1. Build the native helpers (needs Xcode Command Line Tools)
+bash native/build.sh
+
+# 2. Grant Screen Recording permission to your terminal (and, for scheduled
+#    runs, to the node binary) under System Settings > Privacy & Security.
+
+# 3. See which chatrooms are visible, to build your blocklist (no reads):
+node scripts/scan-once.js --dry
+
+#    Put names you never want scanned into src/scan/state/blocklist.json
+#    (copy from blocklist.example.json).
+
+# 4. Run one sweep now (only scans if you've been idle >= 5 min; --force to override):
+node scripts/scan-once.js --force
+#    Outputs land in src/scan/state/out/  (structured JSON + a Markdown daily report).
+
+# 5. Install the idle-aware schedule (launchd, 3x/day by default):
+scripts/install-schedule.sh install     # status | uninstall
+```
+
+The three MCP read tools (`get_line_chatroom_history_*`) are rerouted to this
+screenshot+OCR engine on macOS; their names and parameters are unchanged.
+
+---
+
 ## 繁體中文
 
 透過 MCP（Model Context Protocol），使 AI 工具能夠與 LINE Desktop 整合，並執行訊息的讀取與發送操作。
