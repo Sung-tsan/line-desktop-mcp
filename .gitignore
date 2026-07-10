@@ -14,5 +14,9 @@ src/scan/state/chatlist-snapshot.txt
 src/scan/state/out/*
 !src/scan/state/out/.gitkeep
 
+# DIKW push config (contains bearer token) and offline retry queue
+src/scan/state/dikw.json
+src/scan/state/outbox.json
+
 # os / editor
 .DS_Store

@@ -105,6 +105,34 @@ scripts/install-schedule.sh install     # status | uninstall
 The three MCP read tools (`get_line_chatroom_history_*`) are rerouted to this
 screenshot+OCR engine on macOS; their names and parameters are unchanged.
 
+### DIKW 串接（推送到 DIKW pipeline）
+
+每次 `scripts/scan-once.js` 完成掃描、寫完 `state/out/scan-*.json` 後，會嘗試把這次
+掃描結果 POST 到 DIKW ingest API（`${url}/api/ingest/line`，Bearer token 驗證）。這一步
+是 best-effort：推送失敗**不會**讓掃描本身失敗，也不會遺失資料。
+
+**設定方式**（任一即可，env 優先於檔案）：
+- 複製 `src/scan/state/dikw.example.json` 為 `src/scan/state/dikw.json`，填入
+  `{ "url": "...", "token": "..." }`（此檔含機密 token，已在 `.gitignore`，不會進版控）。
+- 或設環境變數 `DIKW_INGEST_URL` / `DIKW_INGEST_TOKEN`（適合 launchd plist 或 CI）。
+- 兩者都沒有 → 直接跳過推送，console 會印一行說明，**不算錯誤**。
+
+**行為**：
+- 本次掃描沒有新訊息（`newMessages` 全空）→ 不推送、也不進 outbox。
+- 推送成功（HTTP 200）→ 印出 `received/written/deduped` 統計。
+- 推送失敗但屬於「可能重試就會好」的情況（連不上網路、逾時、5xx、非預期狀態碼）
+  → 該筆 scan JSON 的檔名會被記進 `src/scan/state/outbox.json`（同樣已 gitignore），
+  **不複製內容**，只存參照。下次 `scan-once.js` 執行時，開頭會先重試 outbox 裡的每一筆，
+  成功就移除、失敗就累計次數，滿 **10 次**還是失敗會標記 `dead: true` 並保留檔案，
+  之後不再自動重試，需要人工檢查（通常代表 endpoint 設錯或長期掛掉）。
+- 推送失敗且是「重試也沒用」的情況（HTTP 401 token 錯、400 payload 格式錯）
+  → **不會**進 outbox（reseend 同樣的 bytes 不會變好），直接在 console 印出明顯警告，
+  需要人工修設定或修 payload。
+
+**切換到 prod**：把 `src/scan/state/dikw.json` 的 `url` 從本機測試值改成正式 Vercel
+網址（例如 `https://<your-app>.vercel.app`），token 也換成正式的 `DIKW_INGEST_TOKEN`
+即可，不需要重啟或改程式碼。
+
 ---
 
 ## 繁體中文

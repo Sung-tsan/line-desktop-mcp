@@ -39,6 +39,12 @@ import {
   updateSeenChats,
   diffAndRecord,
 } from '../src/scan/state.js';
+import {
+  loadDikwConfig,
+  pushScan,
+  enqueueOutbox,
+  flushOutbox,
+} from '../src/scan/push.js';
 
 function parseArgs(argv) {
   const cfg = { dry: false, idleMin: 5, force: false, help: false };
@@ -182,6 +188,45 @@ async function main() {
   );
   console.error(`  JSON: ${jsonPath}`);
   console.error(`  日報: ${mdPath}`);
+
+  await pushToDikw(scan, jsonPath, totalNew);
+}
+
+/**
+ * Push the finished scan to the DIKW ingest API (best-effort). Always flushes
+ * the outbox first so retries stay in order ahead of the newest scan. Never
+ * throws -- a push failure must not fail the scan itself.
+ */
+async function pushToDikw(scan, jsonPath, totalNew) {
+  try {
+    const config = await loadDikwConfig();
+    if (!config) return; // loadDikwConfig already logged why
+
+    await flushOutbox(config);
+
+    if (totalNew === 0) {
+      console.error('DIKW 推送：本次無新訊息，略過推送。');
+      return;
+    }
+
+    const result = await pushScan(scan, config);
+    if (result.status === 'ok') {
+      console.error(
+        `DIKW 推送成功：received=${result.body?.received} written=${result.body?.written} deduped=${result.body?.deduped}`
+      );
+    } else if (result.status === 'auth' || result.status === 'bad_request') {
+      console.error(
+        `DIKW 推送失敗且不可重試（HTTP ${result.httpStatus} ${result.message}），不進 outbox，請人工檢查設定/payload。`
+      );
+    } else {
+      console.error(`DIKW 推送失敗：${result.message}，加入 outbox 待下次掃描補推。`);
+      await enqueueOutbox(jsonPath);
+    }
+  } catch (e) {
+    // The scan itself already succeeded and is on disk; a bug in the push
+    // subsystem must never make scan-once.js report failure.
+    console.error(`DIKW 推送：內部錯誤（已略過，掃描結果不受影響）：${e?.message || e}`);
+  }
 }
 
 main().catch((e) => {
