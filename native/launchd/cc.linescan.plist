@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template launchd agent for the idle-aware LINE scan.
+
+  DO NOT load this file directly. Run scripts/install-schedule.sh, which fills in
+  the __NODE__ / __DAEMON__ / __LOG__ / __WORKDIR__ placeholders and installs a
+  concrete copy to ~/Library/LaunchAgents/cc.linescan.plist.
+
+  StartCalendarInterval fires scan-daemon three times a day; the daemon then
+  WAITS for the user to be idle before actually scanning (so it never interrupts
+  work). Times below are sensible defaults — review after ~a week and adjust to
+  your own rhythm (e.g. right after standup, lunch, and mid-afternoon).
+
+  NOTE: the process launchd runs (node) needs Screen Recording permission of its
+  own — grant it under System Settings > Privacy & Security > Screen Recording.
+  Granting it to your terminal is NOT enough for the launchd-spawned process.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>cc.linescan</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__DAEMON__</string>
+    <string>--idle-min</string>
+    <string>5</string>
+    <string>--window-min</string>
+    <string>60</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key><integer>9</integer>
+      <key>Minute</key><integer>10</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>10</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>15</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+</dict>
+</plist>
