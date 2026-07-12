@@ -1,14 +1,17 @@
 #!/bin/bash
-# install-schedule.sh — install / remove the idle-aware LINE scan launchd agent.
+# install-schedule.sh — install / remove the LINE scan launchd agents.
 #
 # Usage:
-#   scripts/install-schedule.sh install    # fill template, load into launchd
-#   scripts/install-schedule.sh uninstall  # unload + remove installed plist
-#   scripts/install-schedule.sh status     # show whether it's loaded
+#   scripts/install-schedule.sh install    # fill templates, load into launchd
+#   scripts/install-schedule.sh uninstall  # unload + remove installed plists
+#   scripts/install-schedule.sh status     # show whether they're loaded
 #
-# The template lives at native/launchd/cc.linescan.plist. This script fills the
-# __NODE__ / __DAEMON__ / __LOG__ / __WORKDIR__ placeholders with absolute paths
-# and installs a concrete copy to ~/Library/LaunchAgents/cc.linescan.plist.
+# Two agents, both templated under native/launchd/ and installed to
+# ~/Library/LaunchAgents/ with __NODE__/__DAEMON__/__LOG__/__WORKDIR__ filled in:
+#   cc.linescan         3x/day schedule (09:10/12:10/15:30), idle gate 5 min
+#   cc.linescan.manual  no schedule; fire on demand ("water-break" button):
+#                         launchctl kickstart gui/$(id -u)/cc.linescan.manual
+#                       idle gate 1 min, gives up after 20 min.
 #
 # IMPORTANT: the node binary launchd runs needs its OWN Screen Recording
 # permission (System Settings > Privacy & Security > Screen Recording). Granting
@@ -16,10 +19,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-TEMPLATE="$REPO/native/launchd/cc.linescan.plist"
-LABEL="cc.linescan"
-INSTALLED="$HOME/Library/LaunchAgents/$LABEL.plist"
-LOG="$HOME/Library/Logs/$LABEL.log"
+LABELS=("cc.linescan" "cc.linescan.manual")
+LOG="$HOME/Library/Logs/cc.linescan.log" # both agents share one log
 
 resolve_node() {
   if command -v node >/dev/null 2>&1; then command -v node; return; fi
@@ -36,35 +37,46 @@ case "$cmd" in
     NODE="$(resolve_node)"
     DAEMON="$REPO/scripts/scan-daemon.js"
     mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LOG")"
-    sed \
-      -e "s#__NODE__#$NODE#g" \
-      -e "s#__DAEMON__#$DAEMON#g" \
-      -e "s#__WORKDIR__#$REPO#g" \
-      -e "s#__LOG__#$LOG#g" \
-      "$TEMPLATE" > "$INSTALLED"
-    # reload if already present
-    launchctl unload "$INSTALLED" 2>/dev/null || true
-    launchctl load "$INSTALLED"
-    echo "installed + loaded: $INSTALLED"
+    for LABEL in "${LABELS[@]}"; do
+      TEMPLATE="$REPO/native/launchd/$LABEL.plist"
+      INSTALLED="$HOME/Library/LaunchAgents/$LABEL.plist"
+      sed \
+        -e "s#__NODE__#$NODE#g" \
+        -e "s#__DAEMON__#$DAEMON#g" \
+        -e "s#__WORKDIR__#$REPO#g" \
+        -e "s#__LOG__#$LOG#g" \
+        "$TEMPLATE" > "$INSTALLED"
+      # reload if already present
+      launchctl unload "$INSTALLED" 2>/dev/null || true
+      launchctl load "$INSTALLED"
+      echo "installed + loaded: $INSTALLED"
+    done
     echo "node:   $NODE"
     echo "daemon: $DAEMON"
     echo "log:    $LOG"
     echo
+    echo "Manual trigger: launchctl kickstart gui/$(id -u)/cc.linescan.manual"
     echo "Reminder: grant Screen Recording permission to '$NODE' (or its wrapper)"
     echo "under System Settings > Privacy & Security > Screen Recording."
     ;;
   uninstall)
-    launchctl unload "$INSTALLED" 2>/dev/null || true
-    rm -f "$INSTALLED"
-    echo "uninstalled: $INSTALLED"
+    for LABEL in "${LABELS[@]}"; do
+      INSTALLED="$HOME/Library/LaunchAgents/$LABEL.plist"
+      launchctl unload "$INSTALLED" 2>/dev/null || true
+      rm -f "$INSTALLED"
+      echo "uninstalled: $INSTALLED"
+    done
     ;;
   status)
-    if launchctl list | grep -q "$LABEL"; then
-      echo "loaded: $LABEL"
-    else
-      echo "not loaded: $LABEL"
-    fi
-    [ -f "$INSTALLED" ] && echo "installed plist: $INSTALLED" || echo "no installed plist"
+    for LABEL in "${LABELS[@]}"; do
+      if launchctl list | grep -q "$LABEL"; then
+        echo "loaded: $LABEL"
+      else
+        echo "not loaded: $LABEL"
+      fi
+      INSTALLED="$HOME/Library/LaunchAgents/$LABEL.plist"
+      [ -f "$INSTALLED" ] && echo "  installed plist: $INSTALLED" || echo "  no installed plist"
+    done
     ;;
   *)
     echo "usage: $0 {install|uninstall|status}" >&2

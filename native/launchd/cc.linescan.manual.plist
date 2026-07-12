@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Manual "water-break" trigger for the LINE scan — no schedule of its own.
+
+  Fire it on demand with:
+      launchctl kickstart gui/$(id -u)/cc.linescan.manual
+
+  Compared to cc.linescan (the 3x/day scheduled agent) this uses a much
+  shorter idle gate: press the button as you stand up, and the scan starts
+  once you have been away from keyboard+mouse for ~1 minute. If you never
+  leave, it gives up after 20 minutes. Runs node directly (not via a shell
+  wrapper) so the Screen Recording TCC grant is the same one cc.linescan uses.
+
+  Like the template cc.linescan.plist, the __NODE__/__DAEMON__/__LOG__/
+  __WORKDIR__ placeholders are filled in by scripts/install-schedule.sh; a
+  concrete copy lands in ~/Library/LaunchAgents/cc.linescan.manual.plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>cc.linescan.manual</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__DAEMON__</string>
+    <string>--idle-min</string>
+    <string>1</string>
+    <string>--window-min</string>
+    <string>20</string>
+    <string>--interval-sec</string>
+    <string>10</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+</dict>
+</plist>
