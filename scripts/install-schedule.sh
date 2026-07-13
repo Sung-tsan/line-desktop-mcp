@@ -69,7 +69,9 @@ case "$cmd" in
     ;;
   status)
     for LABEL in "${LABELS[@]}"; do
-      if launchctl list | grep -q "$LABEL"; then
+      # launchctl print 直查 label;不能用 `launchctl list | grep -q`(pipefail 下 grep -q 提早退出
+      # 造成 SIGPIPE 假陰性,已載入也顯示 not loaded)。
+      if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
         echo "loaded: $LABEL"
       else
         echo "not loaded: $LABEL"
