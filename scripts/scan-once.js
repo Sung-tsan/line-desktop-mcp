@@ -44,6 +44,7 @@ import {
   pushScan,
   enqueueOutbox,
   flushOutbox,
+  postStatus,
 } from '../src/scan/push.js';
 import { initScanControl, isFatalAbort, ScanAbort } from '../src/scan/scan-control.js';
 
@@ -149,6 +150,10 @@ async function main() {
     }
   }
 
+  // 進度回報(fire-and-forget,見 push.js postStatus):讓 DIKW 網頁面板看得到
+  // 「開始了/跑到哪/結束沒」。--dry 是本機建 blocklist 用,不回報。
+  if (!cfg.dry) void postStatus('running', 'init', '掃描開始 · 帶 LINE 到前景');
+
   const result = await withFocusRestore(async () => {
     const wi = await ensureLineForeground();
 
@@ -165,6 +170,7 @@ async function main() {
     try {
       const all = await enumerateAllChats(wi);
       enumerated = all.length;
+      void postStatus('running', 'read', `列舉 ${all.length} 室 · 逐室讀取中`);
       const names = all.map((c) => c.name);
       const firstSeen = await updateSeenChats(names);
       const kept = applyBlocklist(all, blocklist);
@@ -233,6 +239,12 @@ async function main() {
 
   await pushToDikw(scan, jsonPath, totalNew);
 
+  if (result.aborted) {
+    await postStatus('aborted', result.aborted.phase, `原因:${result.aborted.reason} · 部分結果:列舉${result.enumerated}·讀${result.scanned}·新訊息${totalNew}`);
+  } else {
+    await postStatus('done', '', `列舉 ${result.enumerated} 室 · 讀 ${result.scanned} 室 · 新訊息 ${totalNew} 則`);
+  }
+
   // A watchdog/abort stop must surface as a non-zero exit (part results still saved).
   if (result.aborted) process.exitCode = 1;
 }
@@ -274,7 +286,8 @@ async function pushToDikw(scan, jsonPath, totalNew) {
   }
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error(`scan-once 失敗：${e?.message || e}`);
+  await postStatus('aborted', '', `掃描失敗:${String(e?.message || e).slice(0, 150)}`);
   process.exitCode = 1;
 });

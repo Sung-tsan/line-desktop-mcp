@@ -18,6 +18,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { idleSeconds } from '../src/scan/scan-engine.js';
+import { postStatus } from '../src/scan/push.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCAN_ONCE = join(__dirname, 'scan-once.js');
@@ -56,6 +57,8 @@ async function main() {
     `[${new Date().toISOString()}] scan-daemon 起床：等待閒置 ≥ ${cfg.idleMin} 分，` +
       `視窗 ${cfg.windowMin} 分，每 ${cfg.intervalSec}s 檢查一次。`
   );
+  // 進度回報(fire-and-forget):網頁面板看得到「已接單,在等閒置」。
+  void postStatus('waiting', '', `等待閒置 ≥${cfg.idleMin} 分(${cfg.windowMin} 分內有效)`);
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -75,6 +78,7 @@ async function main() {
       console.error(
         `[${new Date().toISOString()}] 視窗 ${cfg.windowMin} 分內未等到閒置（最後閒置 ${Math.round(idle)}s），跳過本次。`
       );
+      await postStatus('gaveup', '', `${cfg.windowMin} 分內沒等到你離開電腦,本次未掃`);
       process.exit(0);
     }
     await sleep(cfg.intervalSec * 1000);

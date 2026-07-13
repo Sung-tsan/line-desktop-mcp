@@ -112,6 +112,28 @@ export async function pushScan(scan, config) {
   }
 }
 
+/**
+ * Fire-and-forget scan status update to `${url}/api/line-scan` so the DIKW web
+ * panel can show "did it start / where is it / did it finish". NEVER throws and
+ * never blocks the scan (10s timeout, all errors swallowed) — status reporting
+ * must not be able to break scanning. Silently no-ops when push isn't configured.
+ * States (see dikw-loop /api/line-scan): waiting|running|done|aborted|gaveup.
+ */
+export async function postStatus(state, stage = '', detail = '') {
+  try {
+    const config = await loadDikwConfig();
+    if (!config) return;
+    await fetch(`${config.url}/api/line-scan`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'status', state, stage, detail }),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch {
+    /* status 回報失敗不影響掃描本體 */
+  }
+}
+
 async function readOutbox() {
   const o = await readJson(OUTBOX_PATH, { entries: [] });
   return Array.isArray(o.entries) ? o.entries : [];

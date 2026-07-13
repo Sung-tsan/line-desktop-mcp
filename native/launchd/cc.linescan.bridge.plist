@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Cloud-to-Mac bridge for the DIKW web "掃描 LINE" button.
+
+  Every 60s launchd runs scan-bridge.js (one-shot, silent when nothing is
+  pending). When the web cockpit has filed a scan request, the bridge claims it
+  and kickstarts cc.linescan.manual — so a click on the website starts a local
+  idle-gated scan within ~1 minute.
+
+  The bridge itself never touches the screen (no Screen Recording permission
+  needed); the actual scan runs under cc.linescan.manual's node as usual.
+
+  Placeholders (__NODE__/__BRIDGE__/__LOG__/__WORKDIR__) are filled by
+  scripts/install-schedule.sh into ~/Library/LaunchAgents/cc.linescan.bridge.plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>cc.linescan.bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__BRIDGE__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+</dict>
+</plist>

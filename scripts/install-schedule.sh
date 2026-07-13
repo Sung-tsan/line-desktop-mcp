@@ -6,12 +6,14 @@
 #   scripts/install-schedule.sh uninstall  # unload + remove installed plists
 #   scripts/install-schedule.sh status     # show whether they're loaded
 #
-# Two agents, both templated under native/launchd/ and installed to
-# ~/Library/LaunchAgents/ with __NODE__/__DAEMON__/__LOG__/__WORKDIR__ filled in:
+# Three agents, all templated under native/launchd/ and installed to
+# ~/Library/LaunchAgents/ with __NODE__/__DAEMON__/__BRIDGE__/__LOG__/__WORKDIR__ filled in:
 #   cc.linescan         3x/day schedule (09:10/12:10/15:30), idle gate 5 min
 #   cc.linescan.manual  no schedule; fire on demand ("water-break" button):
 #                         launchctl kickstart gui/$(id -u)/cc.linescan.manual
 #                       idle gate 1 min, gives up after 20 min.
+#   cc.linescan.bridge  every 60s; polls the DIKW web cockpit for a pending
+#                       scan request and kickstarts cc.linescan.manual.
 #
 # IMPORTANT: the node binary launchd runs needs its OWN Screen Recording
 # permission (System Settings > Privacy & Security > Screen Recording). Granting
@@ -19,7 +21,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LABELS=("cc.linescan" "cc.linescan.manual")
+LABELS=("cc.linescan" "cc.linescan.manual" "cc.linescan.bridge")
 LOG="$HOME/Library/Logs/cc.linescan.log" # both agents share one log
 
 resolve_node() {
@@ -43,6 +45,7 @@ case "$cmd" in
       sed \
         -e "s#__NODE__#$NODE#g" \
         -e "s#__DAEMON__#$DAEMON#g" \
+        -e "s#__BRIDGE__#$REPO/scripts/scan-bridge.js#g" \
         -e "s#__WORKDIR__#$REPO#g" \
         -e "s#__LOG__#$LOG#g" \
         "$TEMPLATE" > "$INSTALLED"
