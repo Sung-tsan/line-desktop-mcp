@@ -237,7 +237,11 @@ function isChatNameCandidate(text) {
  * within each row the topmost line that looks like a name (conf > 0.82, not UI
  * chrome, not a bare timestamp/badge) is the chatroom name.
  *
- * @returns {Promise<Array<{name,screenX,screenY,pxY}>>}
+ * Each row also carries the raw `marker` (its sidebar timestamp text, e.g.
+ * "昨天"/"下午 3:24"/"6月30日") so the incremental filter can skip untouched
+ * rooms — this reuses the OCR pass already done here (no extra screenshot).
+ *
+ * @returns {Promise<Array<{name,marker,screenX,screenY,pxY}>>}
  */
 export async function listSidebarChats(wi) {
   const o = await captureOcr(wi);
@@ -274,7 +278,7 @@ export async function listSidebarChats(wi) {
     usedName.add(best);
     usedRowY.push(best.y);
     const { screenX, screenY } = pxToScreen(best, wi, scale);
-    chats.push({ name: best.text.trim(), screenX, screenY, pxY: best.y });
+    chats.push({ name: best.text.trim(), marker: ts.text.trim(), screenX, screenY, pxY: best.y });
   }
   chats.sort((a, b) => a.pxY - b.pxY);
   return chats;
@@ -325,14 +329,17 @@ export function normalizeChatName(name) {
 /**
  * Enumerate the FULL chatroom name list by scrolling the sidebar top->bottom,
  * de-duplicating by normalized name (first-seen order preserved; longest raw
- * variant kept for display). Coordinates are re-derived at click time.
- * @returns {Promise<Array<{name:string, key:string}>>}
+ * variant kept for display). Each room also carries its sidebar `marker`
+ * timestamp text (first non-empty seen), reused by the incremental filter.
+ * Coordinates are re-derived at click time.
+ * @returns {Promise<Array<{name:string, key:string, marker:string|null}>>}
  */
 export async function enumerateAllChats(wi, { maxPages = 40 } = {}) {
   const ctl = getScanControl();
   ctl.enterPhase('enumerate'); // starts the enumeration stage watchdog + scroll budget
   await scrollToSidebarTop(wi);
   const byKey = new Map();
+  const markerByKey = new Map();
   const order = [];
   // Terminate on OCR-content stability: if two CONSECUTIVE pages show the exact
   // same set of visible names, we've reached the bottom. (Watchdog + scroll cap +
@@ -347,9 +354,11 @@ export async function enumerateAllChats(wi, { maxPages = 40 } = {}) {
       if (!key) continue;
       if (!byKey.has(key)) {
         byKey.set(key, c.name);
+        markerByKey.set(key, c.marker || null);
         order.push(key);
-      } else if (c.name.length > byKey.get(key).length) {
-        byKey.set(key, c.name); // keep the fullest OCR variant for display
+      } else {
+        if (c.name.length > byKey.get(key).length) byKey.set(key, c.name); // fullest OCR variant
+        if (!markerByKey.get(key) && c.marker) markerByKey.set(key, c.marker); // backfill marker
       }
     }
     ctl.progress(`enumerate: page ${page + 1}, ${order.length} rooms so far`);
@@ -360,7 +369,7 @@ export async function enumerateAllChats(wi, { maxPages = 40 } = {}) {
     await scrollSidebar(wi, -6); // scroll down one page
   }
   ctl.progress(`enumerate done: ${order.length} rooms in ${Math.round(ctl.elapsedMs() / 1000)}s`);
-  return order.map((key) => ({ key, name: byKey.get(key) }));
+  return order.map((key) => ({ key, name: byKey.get(key), marker: markerByKey.get(key) || null }));
 }
 
 /**

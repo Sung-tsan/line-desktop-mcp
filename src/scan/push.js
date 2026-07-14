@@ -118,15 +118,20 @@ export async function pushScan(scan, config) {
  * never blocks the scan (10s timeout, all errors swallowed) — status reporting
  * must not be able to break scanning. Silently no-ops when push isn't configured.
  * States (see dikw-loop /api/line-scan): waiting|running|done|aborted|gaveup.
+ * Optional `counts` ({received,written,deduped}) is attached to the body when
+ * given so the panel can show "did it actually capture anything" (else omitted,
+ * keeping the old body shape for callers that don't pass it).
  */
-export async function postStatus(state, stage = '', detail = '') {
+export async function postStatus(state, stage = '', detail = '', counts = null) {
   try {
     const config = await loadDikwConfig();
     if (!config) return;
+    const body = { op: 'status', state, stage, detail };
+    if (counts) body.counts = counts;
     await fetch(`${config.url}/api/line-scan`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op: 'status', state, stage, detail }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(10000),
     });
   } catch {
