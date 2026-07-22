@@ -401,8 +401,29 @@ async function scrollSidebar(wi, lines) {
   await sleep(250);
 }
 
-async function scrollToSidebarTop(wi) {
-  for (let i = 0; i < 8; i++) await scrollSidebar(wi, 8); // scroll up hard
+/**
+ * Scroll the sidebar all the way UP, detecting the top by content stability:
+ * when an up-scroll no longer changes the visible first screen, we're at the top
+ * (symmetric with enumerate's "two identical pages = bottom"). The old fixed
+ * 8-iteration blind scroll UNDER-scrolled long lists — after enumerate left the
+ * sidebar at the bottom of 130 rooms, locateChat started mid-list and only paged
+ * DOWN, so every recent (top) room was unreachable and burned its 30s per-chat
+ * watchdog (2026-07-22 17:47: readOk 0 / readFail 18). Big up-jumps keep the cost
+ * low; when already near the top this returns in ~2 OCRs.
+ */
+async function scrollToSidebarTop(wi, { maxIters = 30, linesPerJump = 16 } = {}) {
+  let prevSig = null;
+  try {
+    prevSig = (await listSidebarChats(wi)).map((c) => c.name).sort().join('|');
+  } catch {
+    /* first OCR failed; the loop below still self-corrects */
+  }
+  for (let i = 0; i < maxIters; i++) {
+    await scrollSidebar(wi, linesPerJump); // positive = up
+    const sig = (await listSidebarChats(wi)).map((c) => c.name).sort().join('|');
+    if (sig && sig === prevSig) return; // up-scroll changed nothing => at the top
+    prevSig = sig;
+  }
 }
 
 /**
@@ -420,6 +441,49 @@ export function normalizeChatName(name) {
     .replace(/[\s_]+/g, ' ')
     .toLowerCase()
     .trim();
+}
+
+// Sørensen–Dice bigram similarity (0..1) — cheap, dependency-free, and forgiving
+// of the character-level jitter OCR produces for the SAME room across captures.
+function bigrams(s) {
+  const out = [];
+  for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
+  return out;
+}
+function diceCoefficient(a, b) {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const counts = new Map();
+  for (const g of bigrams(a)) counts.set(g, (counts.get(g) || 0) + 1);
+  let inter = 0;
+  const bg = bigrams(b);
+  for (const g of bg) {
+    const c = counts.get(g) || 0;
+    if (c > 0) { inter++; counts.set(g, c - 1); }
+  }
+  return (2 * inter) / (bigrams(a).length + bg.length);
+}
+
+/**
+ * Similarity (0..1) between two chatroom names, tolerant of OCR drift. Both are
+ * normalized first, exact => 1, containment => 0.9, else bigram Dice. Needed
+ * because the SAME room OCRs differently at enumerate time vs read time
+ * ("陳董 × 迪威智能" vs "陳董 ×迪威智能"; garbled "adi15數位新創交流群" vs
+ * "aal l數1和剧父沉"), so the old exact `c.name === name` match never located them.
+ * Pure + exported for unit testing.
+ */
+export function roomNameScore(a, b) {
+  const na = normalizeChatName(a);
+  const nb = normalizeChatName(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  if (na.length >= 3 && nb.length >= 3 && (na.includes(nb) || nb.includes(na))) return 0.9;
+  return diceCoefficient(na, nb);
+}
+
+/** True if two names are similar enough to be the same room (default threshold 0.6). */
+export function roomNameMatches(a, b, minScore = 0.6) {
+  return roomNameScore(a, b) >= minScore;
 }
 
 /**
@@ -465,6 +529,16 @@ export async function enumerateAllChats(wi, { maxPages = 40 } = {}) {
     await scrollSidebar(wi, -6); // scroll down one page
   }
   ctl.progress(`enumerate done: ${order.length} rooms in ${Math.round(ctl.elapsedMs() / 1000)}s`);
+  // Leave the sidebar at the TOP: enumerate ends at the bottom, and the read
+  // phase needs recent (top) rooms first — this makes each per-room locateChat's
+  // return-to-top cheap (already at/near the top) instead of the first read
+  // paying a full bottom→top climb inside its 30s watchdog. Done in the roomier
+  // enumerate budget, best-effort (a failure here just costs the old behaviour).
+  try {
+    await scrollToSidebarTop(wi);
+  } catch {
+    /* best effort — locateChat re-tops per room anyway */
+  }
   return order.map((key) => ({ key, name: byKey.get(key), marker: markerByKey.get(key) || null }));
 }
 
@@ -473,14 +547,23 @@ export async function enumerateAllChats(wi, { maxPages = 40 } = {}) {
  * Scrolls the sidebar from the top looking for the name. Throws with the seen
  * list if not found.
  */
-async function locateChat(name, wi, { maxPages = 40 } = {}) {
+async function locateChat(name, wi, { maxPages = 40, minScore = 0.6 } = {}) {
   await scrollToSidebarTop(wi);
   const seen = new Set();
   let stalePages = 0;
   for (let page = 0; page < maxPages; page++) {
     const visible = await listSidebarChats(wi);
-    const hit = visible.find((c) => c.name === name);
-    if (hit) return hit;
+    // Best fuzzy match on this screen (OCR of the same room drifts between the
+    // enumerate pass and now, so exact equality misses it). Take the single
+    // highest-scoring row and accept it only if it clears the threshold — this
+    // avoids clicking a similarly-named neighbour.
+    let best = null;
+    let bestScore = 0;
+    for (const c of visible) {
+      const s = roomNameScore(c.name, name);
+      if (s > bestScore) { best = c; bestScore = s; }
+    }
+    if (best && bestScore >= minScore) return best;
     let added = 0;
     for (const c of visible) if (!seen.has(c.name)) { seen.add(c.name); added++; }
     stalePages = added === 0 ? stalePages + 1 : 0;
