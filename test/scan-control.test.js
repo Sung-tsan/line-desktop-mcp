@@ -145,3 +145,49 @@ test('mock engine loop: sentinel breaks a scroll loop at the next checkpoint', a
   assert.equal(err.reason, 'sentinel');
   assert.ok(iterations >= 5 && iterations < 40, `stopped mid-loop after ${iterations} (not the 40 cap)`);
 });
+
+test('activity abort carries diagnostic evidence (recorded/observed/distance/tolerance/source)', async () => {
+  // Regression for the 2026-07-18..22 blind spot: the abort JSON was a bare
+  // {reason:'activity'} with no way to tell a false trip from a real one.
+  clearAbortSentinel();
+  let where = { x: 100, y: 100 };
+  const ctl = createScanController({ totalMs: 999999, cursorTolerancePx: 10, readCursor: async () => where });
+  ctl.recordCursor({ x: 100, y: 100 });
+  await ctl.checkpoint();
+  where = { x: 400, y: 300 };
+  const err = await ctl.checkpoint().then(() => null, (e) => e);
+  assert.ok(err instanceof ScanAbort);
+  assert.equal(err.reason, 'activity');
+  assert.ok(err.evidence, 'evidence is attached');
+  assert.deepEqual(err.evidence.recorded, { x: 100, y: 100 });
+  assert.deepEqual(err.evidence.observed, { x: 400, y: 300 });
+  assert.equal(err.evidence.tolerancePx, 10);
+  assert.equal(err.evidence.distancePx, Math.round(Math.hypot(300, 200)));
+  assert.equal(err.evidence.source, 'cliclick');
+});
+
+test('recordActualCursor parks the baseline on the ACTUAL cursor, not the intended point', async () => {
+  // Root-cause regression: warp AIMED at the LINE window but the cursor actually
+  // sits where the user left it (warp landed elsewhere, or never fired). The old
+  // code recorded the INTENDED point and every next checkpoint cried "activity".
+  clearAbortSentinel();
+  let where = { x: -802, y: 605 }; // user's real cursor (untouched)
+  const ctl = createScanController({ totalMs: 999999, cursorTolerancePx: 10, readCursor: async () => where });
+  const dev = await ctl.recordActualCursor({ x: 250, y: 420 }); // we aimed here; cursor is really at `where`
+  assert.deepEqual(ctl.lastPlaced, { x: -802, y: 605 }, 'baseline is the ACTUAL cursor, not the intended target');
+  assert.equal(dev, Math.round(Math.hypot(-802 - 250, 605 - 420)), 'returns the aim-vs-actual deviation');
+  await ctl.checkpoint(); // cursor unchanged since the (actual) baseline -> NO false activity
+  // ...but a genuine subsequent user move is still caught.
+  where = { x: 900, y: 900 };
+  const err = await ctl.checkpoint().then(() => null, (e) => e);
+  assert.ok(err instanceof ScanAbort);
+  assert.equal(err.reason, 'activity');
+});
+
+test('recordActualCursor falls back to the intended point when the live read fails', async () => {
+  clearAbortSentinel();
+  const ctl = createScanController({ totalMs: 999999, readCursor: async () => null });
+  const dev = await ctl.recordActualCursor({ x: 12, y: 34 });
+  assert.deepEqual(ctl.lastPlaced, { x: 12, y: 34 }, 'no live read -> keep the intended baseline');
+  assert.equal(dev, null, 'no deviation reported when actual is unknown');
+});

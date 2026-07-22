@@ -109,6 +109,24 @@ export async function restoreCursor(pos) {
   }
 }
 
+// Warn at most once per run: a large gap between where we AIMED a warp/click and
+// where the cursor ACTUALLY landed means the event was dropped — almost always
+// the launchd daemon missing the Accessibility TCC grant (posting HID events
+// needs it; Screen Recording is a separate grant, and READING the cursor needs
+// neither). Without this, an ineffective warp degrades silently to a
+// first-screen-only scan. Threshold is generous (>40px) so it never fires on
+// sub-pixel rounding or a normal in-window warp.
+let _warpIneffectiveWarned = false;
+function noteCursorDeviation(deviationPx) {
+  if (deviationPx == null || deviationPx <= 40 || _warpIneffectiveWarned) return;
+  _warpIneffectiveWarned = true;
+  process.stderr.write(
+    `警告：游標實際落點與預期相距 ${deviationPx}px——warp/scroll/click 可能未生效` +
+      `（背景服務可能缺 Accessibility 權限，與螢幕錄製為不同授權；讀取游標不需此權限故不會報錯）。` +
+      `掃描恐只讀到第一屏。\n`
+  );
+}
+
 /** Name of the frontmost application (or null). */
 export async function getFrontApp() {
   try {
@@ -299,9 +317,11 @@ async function scrollSidebar(wi, lines) {
   ctl.tickScroll(); // per-stage scroll-iteration hard cap
   const p = scrollScreenPoint(wi, 'sidebar');
   await execFileP(SCROLL_BIN, [String(p.x), String(p.y), String(lines)], { timeout: 6000 });
-  // scroll.swift warps the cursor to (p.x,p.y); record it so the activity guard
-  // compares the user's live cursor against where WE last parked it, not a stale point.
-  ctl.recordCursor(p);
+  // scroll.swift warped the cursor toward (p.x,p.y). Record where it ACTUALLY
+  // landed (read via cliclick, same source as the activity guard) — not the
+  // intended point — so a warp that lands elsewhere (coord skew) or never fires
+  // (daemon lacks Accessibility) can't be misread as the user moving the mouse.
+  noteCursorDeviation(await ctl.recordActualCursor(p));
   await sleep(250);
 }
 
@@ -509,7 +529,8 @@ async function scrollMsgAreaUp(wi) {
   ctl.tickScroll();
   const p = scrollScreenPoint(wi, 'msg');
   await execFileP(SCROLL_BIN, [String(p.x), String(p.y), '5'], { timeout: 6000 });
-  ctl.recordCursor(p); // scroll.swift warped the cursor here
+  // Baseline on the cursor's ACTUAL landing (same-source read), not the aimed point.
+  noteCursorDeviation(await ctl.recordActualCursor(p));
   await sleep(600);
 }
 
@@ -529,7 +550,9 @@ export async function readChatMessages(chat, wi, { scrollRounds = 0 } = {}) {
   const loc = await locateChat(name, wi);
   await ctl.checkpoint(); // gate before the click that opens the room
   await cliclick([`c:${loc.screenX},${loc.screenY}`]);
-  ctl.recordCursor({ x: loc.screenX, y: loc.screenY }); // cliclick parks the cursor at the click point
+  // cliclick parks the cursor at the click point; record its ACTUAL position
+  // (same-source read) as the activity baseline, not the intended coordinates.
+  noteCursorDeviation(await ctl.recordActualCursor({ x: loc.screenX, y: loc.screenY }));
   await sleep(1000);
 
   const passes = [];

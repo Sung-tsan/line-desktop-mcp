@@ -71,12 +71,18 @@ export function resolveConfig(opts = {}) {
 // scope 'scan' = fatal, abort the whole sweep, restore, write partial, exit != 0
 // scope 'chat' = recoverable, skip the current chatroom, keep going
 export class ScanAbort extends Error {
-  constructor(reason, phase, scope = 'scan') {
+  constructor(reason, phase, scope = 'scan', evidence = null) {
     super(`scan aborted: ${reason} (stage=${phase}, scope=${scope})`);
     this.name = 'ScanAbort';
     this.reason = reason; // 'sentinel' | 'timeout' | 'scroll-cap' | 'activity'
     this.phase = phase;
     this.scope = scope;
+    // For 'activity': the exact signal that tripped the guard
+    // ({recorded, observed, distancePx, tolerancePx, source}), so a *false*
+    // activity abort is diagnosable from the JSON instead of a bare
+    // {reason:'activity'} — being un-diagnosable is exactly what cost us the
+    // 2026-07-18..22 investigation.
+    this.evidence = evidence;
   }
 }
 export const isFatalAbort = (e) => e instanceof ScanAbort && e.scope === 'scan';
@@ -208,8 +214,47 @@ class ScanController {
     if (!this.lastPlaced) return;
     const cur = await this.readCursor();
     if (cursorMovedBeyond(cur, this.lastPlaced, this.cfg.cursorTolerancePx)) {
-      throw new ScanAbort('activity', this.phase, 'scan');
+      throw new ScanAbort('activity', this.phase, 'scan', {
+        recorded: { x: this.lastPlaced.x, y: this.lastPlaced.y }, // where WE parked/observed the cursor last
+        observed: cur ? { x: cur.x, y: cur.y } : null, // live cursor now (same source as `recorded`)
+        distancePx: Math.round(cursorDistance(cur, this.lastPlaced)),
+        tolerancePx: this.cfg.cursorTolerancePx,
+        source: 'cliclick', // both endpoints read via cliclick p, so this is a real move, not a coord-space mismatch
+      });
     }
+  }
+
+  /**
+   * Park the activity baseline on the cursor's ACTUAL position after a
+   * warp/click, read from the SAME source (cliclick) that checkpoint()'s
+   * activity guard uses. `intended` is where the caller AIMED the cursor; it is
+   * only a fallback (used if the live read fails) and the reference for
+   * detecting an ineffective warp.
+   *
+   * Why this exists (root cause of the 2026-07-18..22 false "activity" aborts):
+   * the old code recorded the INTENDED point. If the warp landed anywhere else —
+   * Retina/multi-display coord skew, or (the confirmed case) a warp that never
+   * moved the cursor because the launchd daemon lacks the Accessibility TCC grant
+   * that posting HID events needs (Screen Recording is a *separate* grant) — the
+   * next checkpoint compared the live cursor against a point it was never at and
+   * cried "user activity", every single scan. Recording the ACTUAL position keeps
+   * baseline and comparison in one coordinate space, so that can't happen; a
+   * genuine user move is still caught because it lands AFTER this readback.
+   *
+   * @returns {Promise<number|null>} px deviation between intended and actual
+   *   (null if either is unavailable). A large deviation means the warp/click did
+   *   not take effect — callers surface it instead of silently degrading.
+   */
+  async recordActualCursor(intended) {
+    const actual = await this.readCursor(); // {x,y} | null, via cliclick p (no extra TCC grant to READ)
+    const aim =
+      typeof intended === 'string'
+        ? parseCursor(intended)
+        : intended && Number.isFinite(intended.x) && Number.isFinite(intended.y)
+          ? { x: intended.x, y: intended.y }
+          : null;
+    this.recordCursor(actual || aim); // prefer ACTUAL; fall back to intended only if the read failed
+    return actual && aim ? Math.round(cursorDistance(actual, aim)) : null;
   }
 
   /**
@@ -255,6 +300,9 @@ const NOOP = {
   cfg: resolveConfig(),
   enterPhase() {},
   recordCursor() {},
+  async recordActualCursor() {
+    return null;
+  },
   async checkpoint() {},
   tickScroll() {},
   progress() {},

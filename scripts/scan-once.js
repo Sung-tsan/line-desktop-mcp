@@ -245,7 +245,9 @@ async function main() {
       }
     } catch (e) {
       if (!(e instanceof ScanAbort)) throw e; // real bug -> propagate
-      aborted = { reason: e.reason, phase: e.phase };
+      // Carry the guard's evidence (activity: recorded vs observed cursor) so a
+      // false abort is diagnosable from the JSON, not a bare {reason:'activity'}.
+      aborted = { reason: e.reason, phase: e.phase, ...(e.evidence ? { evidence: e.evidence } : {}) };
     }
     return { dry: false, chats, enumerated, scanned: chats.length, kept: keptCount, skipped: skippedCount, incremental, aborted };
   });
@@ -268,9 +270,16 @@ async function main() {
   const totalNew = scan.chats.reduce((s, c) => s + c.newMessages.length, 0);
   const modeSummary = result.incremental ? `增量略過 ${result.skipped}/${result.kept} 室` : '全掃';
   if (result.aborted) {
-    const { reason, phase } = result.aborted;
+    const { reason, phase, evidence } = result.aborted;
+    // Activity aborts carry the measured cursor gap so a *false* trip is
+    // diagnosable straight from the log (recorded vs observed, distance, source).
+    const ev =
+      evidence && evidence.observed
+        ? ` [活動證據：記錄(${evidence.recorded.x},${evidence.recorded.y}) ↔ 實測(${evidence.observed.x},${evidence.observed.y})` +
+          `＝相距 ${evidence.distancePx}px＞容差 ${evidence.tolerancePx}px，來源 ${evidence.source}]`
+        : '';
     console.error(
-      `⚠ watchdog 中止於階段「${phase}」（原因：${reason}）。已還原游標/焦點，` +
+      `⚠ watchdog 中止於階段「${phase}」（原因：${reason}）${ev}。已還原游標/焦點，` +
         `保留部分結果：列舉 ${result.enumerated} 室、${modeSummary}、已讀 ${result.scanned} 室、新訊息 ${totalNew} 則。`
     );
   } else {
