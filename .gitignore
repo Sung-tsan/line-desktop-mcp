@@ -4,7 +4,7 @@ node_modules/
 # native build products (compiled from native/*.swift via native/build.sh)
 native/ocr
 native/winid
-native/scroll
+native/input
 
 # runtime state with real chat data (never commit)
 src/scan/state/blocklist.json

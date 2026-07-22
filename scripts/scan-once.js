@@ -47,6 +47,7 @@ import {
   readScanMeta,
   writeScanMeta,
   shouldSkipRoom,
+  shouldAdvanceWatermark,
 } from '../src/scan/state.js';
 import {
   loadDikwConfig,
@@ -189,6 +190,7 @@ async function main() {
     let enumerated = 0;
     let keptCount = 0;
     let skippedCount = 0;
+    let verifiedOpens = 0; // rooms whose header confirmed the click actually opened them
     let aborted = null;
     try {
       const all = await enumerateAllChats(wi);
@@ -224,7 +226,7 @@ async function main() {
         let newMessages = [];
         let error = null;
         try {
-          const msgs = await readChatMessages(chat, wi);
+          const msgs = await readChatMessages(chat, wi, { onOpened: (ok) => { if (ok) verifiedOpens += 1; } });
           const withFp = msgs.map((m) => ({ ...m, fp: fingerprint(m) }));
           const fresh = await diffAndRecord(chat.name, withFp);
           newMessages = fresh.map(({ fp, ...m }) => m);
@@ -249,7 +251,7 @@ async function main() {
       // false abort is diagnosable from the JSON, not a bare {reason:'activity'}.
       aborted = { reason: e.reason, phase: e.phase, ...(e.evidence ? { evidence: e.evidence } : {}) };
     }
-    return { dry: false, chats, enumerated, scanned: chats.length, kept: keptCount, skipped: skippedCount, incremental, aborted };
+    return { dry: false, chats, enumerated, scanned: chats.length, kept: keptCount, skipped: skippedCount, verifiedOpens, incremental, aborted };
   });
 
   if (result.dry) {
@@ -292,13 +294,25 @@ async function main() {
 
   const push = await pushToDikw(scan, jsonPath, totalNew);
 
-  // Advance the watermark ONLY when this scan fully completed (no abort) AND its
-  // results are safely landed (push ok, or genuinely nothing to push). A failed
-  // push (queued to outbox) or an abort leaves the watermark, so next run
-  // re-reads more rooms — rather re-scan than miss.
-  if (!result.aborted && push.advance) {
+  // Advance the watermark ONLY when the scan is trustworthy AND landed — never on
+  // abort, never on a held push, and never when every room we read came back empty
+  // with zero verified opens (the broken-input-path signature; see
+  // shouldAdvanceWatermark). Otherwise the next run would incrementally skip rooms
+  // that really have new messages.
+  const advance = shouldAdvanceWatermark({
+    aborted: result.aborted,
+    pushAdvance: push.advance,
+    scanned: result.scanned,
+    totalNew,
+    verifiedOpens: result.verifiedOpens,
+  });
+  if (advance) {
     await writeScanMeta({ lastSuccessAt: scanStartedAt });
     console.error(`  增量水位已更新：lastSuccessAt=${scanStartedAt}`);
+  } else if (!result.aborted && push.advance && result.scanned > 0 && totalNew === 0 && (result.verifiedOpens || 0) === 0) {
+    console.error(
+      `  ⚠ 已讀 ${result.scanned} 室全 0 訊息且無任何室標題核對成功——疑點擊/讀取失效，保守不推進水位線，下次全量重讀。`
+    );
   }
 
   const doneDetail = `列舉 ${result.enumerated} 室 · ${modeSummary} · 讀 ${result.scanned} 室 · 新訊息 ${totalNew} 則`;

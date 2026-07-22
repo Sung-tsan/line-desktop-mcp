@@ -43,25 +43,41 @@ screenX = x + ocr_px_x / scale
 screenY = y + ocr_px_y / scale
 ```
 
-## scroll.swift → `scroll`
-Posts scroll-wheel events at a screen point (to page the sidebar or message
-area) without visibly parking the cursor there.
+## input.swift → `input`  ⚠️ needs Accessibility
+The ONE input helper: cursor **move**, **click**, and **scroll**. It is the only
+binary that posts HID events, so it is the only one that needs the macOS
+**Accessibility** grant — posting is attributed to *this* binary, not to the
+`node` that spawns it (granting node is not enough; that is why `cliclick`'s
+clicks were silently dropped under launchd). Positioning uses
+`CGWarpMouseCursorPosition` (needs no grant). `cliclick` is used ONLY for `p`
+(reading the cursor).
 
 ```
-scroll <x> <y> <lines>     # positive lines = up, negative = down
+input move   <x> <y>            # warp the cursor
+input click  <x> <y>            # warp, then a real left click
+input scroll <x> <y> <lines>    # warp, then wheel; positive = up, negative = down
 ```
+
+Grant once: **System Settings → Privacy & Security → Accessibility → add the
+absolute path `<repo>/native/input`.** Keep that path stable. ⚠️ Rebuilding
+(`native/build.sh`) changes the binary's code hash, so the grant must be
+re-approved after each rebuild — rebuild rarely.
 
 ## Read flow (implemented in ../src/scan/scan-engine.js)
 1. Bring LINE to the foreground and poll `winid` until the window is rendered.
 2. `screencapture -x -o -l <id>` → PNG (needs **Screen Recording** permission).
 3. `ocr` the PNG; split sidebar (left) from message area (right) by `x`.
 4. To open a chat: OCR the sidebar, find the row by name, translate its box to a
-   screen point, and **click it with `cliclick`** — AXPress / set-selected do
+   screen point, and **click it with `input click`** — AXPress / set-selected do
    nothing on these rows (LINE wires no AX action); a real click is the only
-   thing that works.
+   thing that works, and it must come from the granted `input` binary.
 5. Diff against the last scan (message fingerprints) so only new messages return.
 6. Restore the previous frontmost app + cursor when done.
 
-One-time permission: System Settings › Privacy & Security › Screen Recording ›
-enable the process that runs the scan (your terminal for manual runs, and the
-`node` binary launchd spawns for scheduled runs — grant it separately).
+One-time permissions (two separate grants):
+- **Screen Recording** — the process that runs the scan (`node` launchd spawns
+  for scheduled runs; your terminal for manual runs). Needed for `screencapture`.
+- **Accessibility** — the `native/input` binary (absolute path). Needed to POST
+  clicks/scroll. Granting `node` does NOT cover it — TCC attributes posted events
+  to `input` itself. Without this, clicks/scroll are silently dropped and every
+  room reads 0 messages.

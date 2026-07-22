@@ -234,9 +234,9 @@ class ScanController {
    *
    * Why this exists (root cause of the 2026-07-18..22 false "activity" aborts):
    * the old code recorded the INTENDED point. If the actual cursor landed
-   * anywhere else — a warp that never moved it (scroll.swift used to post a
-   * .mouseMoved event, silently dropped in the launchd context; fixed to
-   * CGWarpMouseCursorPosition), or a small click-settle offset — the next
+   * anywhere else — a warp that never moved it (the scroll path used to post a
+   * .mouseMoved event, silently dropped under launchd; the input helper now warps
+   * via CGWarpMouseCursorPosition), or a small click-settle offset — the next
    * checkpoint compared the live cursor against a point it was never at and
    * cried "user activity". Recording the ACTUAL position keeps baseline and
    * comparison in one coordinate space, so that can't happen; a genuine user

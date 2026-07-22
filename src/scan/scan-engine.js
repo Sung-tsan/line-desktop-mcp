@@ -38,7 +38,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const NATIVE_DIR = resolve(__dirname, '../../native');
 const OCR_BIN = join(NATIVE_DIR, 'ocr');
 const WINID_BIN = join(NATIVE_DIR, 'winid');
-const SCROLL_BIN = join(NATIVE_DIR, 'scroll');
+// The ONE input helper (move/click/scroll). It is the only binary that posts HID
+// events, so it is the only one that must hold the Accessibility grant — see
+// native/input.swift. cliclick posts clicks from its OWN (ungranted) binary, which
+// is why its clicks were silently dropped under launchd; we now use cliclick for
+// `p` (reading the cursor) ONLY.
+const INPUT_BIN = join(NATIVE_DIR, 'input');
 
 export const STATE_DIR = join(__dirname, 'state');
 export const OUT_DIR = join(STATE_DIR, 'out');
@@ -81,11 +86,17 @@ function resolveCliclick() {
 }
 const CLICLICK = resolveCliclick();
 
+// cliclick is used for READING the cursor only (`p`) — reading needs no TCC grant.
 async function cliclick(args) {
   return execFileP(CLICLICK, args, {
     timeout: 8000,
     env: { ...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}` },
   });
+}
+
+// All cursor MOVEMENT / CLICK / SCROLL goes through the single granted helper.
+async function input(args) {
+  return execFileP(INPUT_BIN, args.map(String), { timeout: 8000 });
 }
 
 /** Snapshot the current mouse position as "x,y" (or null on failure). */
@@ -102,8 +113,10 @@ export async function saveCursor() {
 /** Move the mouse back to a saved "x,y" position (best effort). */
 export async function restoreCursor(pos) {
   if (!pos) return;
+  const m = /^(-?\d+),(-?\d+)$/.exec(String(pos).trim());
+  if (!m) return;
   try {
-    await cliclick([`m:${pos}`]);
+    await input(['move', m[1], m[2]]); // via the one helper (CGWarp; consistent with click/scroll)
   } catch {
     /* best effort */
   }
@@ -367,18 +380,22 @@ function scrollScreenPoint(wi, col) {
 }
 
 async function scrollSidebar(wi, lines) {
-  // positive lines = up (toward top), negative = down (see native/scroll.swift)
+  // positive lines = up (toward top), negative = down (see native/input.swift)
   const ctl = getScanControl();
   await ctl.checkpoint(); // abort/watchdog/activity gate before every scroll
   ctl.tickScroll(); // per-stage scroll-iteration hard cap
   const p = scrollScreenPoint(wi, 'sidebar');
-  await execFileP(SCROLL_BIN, [String(p.x), String(p.y), String(lines)], { timeout: 6000 });
-  // scroll.swift warped the cursor toward (p.x,p.y). Record where it ACTUALLY
-  // landed (read via cliclick, same source as the activity guard) — not the
-  // intended point — so a warp that lands elsewhere (coord skew) or never fires
-  // can't be misread as the user moving the mouse. Sidebar scrolls all target the
-  // SAME point, so a constant diff here = pure offset (see reportWarp).
-  reportWarp('sidebar-scroll', p, ctl.lastPlaced, await ctl.recordActualCursor(p));
+  await input(['scroll', p.x, p.y, lines]);
+  // input warped the cursor toward (p.x,p.y). Record where it ACTUALLY landed
+  // (read via cliclick, same source as the activity guard) — not the intended
+  // point — so a warp that lands elsewhere can't be misread as the user moving
+  // the mouse. Sidebar scrolls all target the SAME point, so a constant diff here
+  // = pure offset (see reportWarp). NOTE: sequence the record BEFORE reading
+  // ctl.lastPlaced — JS evaluates args left-to-right, so an inline
+  // `reportWarp(.., ctl.lastPlaced, await recordActualCursor(..))` logs the STALE
+  // prior position (the 465px phantom in the 2026-07-22 diagnostic run).
+  const dev = await ctl.recordActualCursor(p);
+  reportWarp('sidebar-scroll', p, ctl.lastPlaced, dev);
   await sleep(250);
 }
 
@@ -585,33 +602,40 @@ async function scrollMsgAreaUp(wi) {
   await ctl.checkpoint();
   ctl.tickScroll();
   const p = scrollScreenPoint(wi, 'msg');
-  await execFileP(SCROLL_BIN, [String(p.x), String(p.y), '5'], { timeout: 6000 });
-  // Baseline on the cursor's ACTUAL landing (same-source read), not the aimed point.
-  reportWarp('msg-scroll', p, ctl.lastPlaced, await ctl.recordActualCursor(p));
+  await input(['scroll', p.x, p.y, 5]);
+  // Baseline on the cursor's ACTUAL landing (same-source read), not the aimed
+  // point; sequence the record before reading lastPlaced (see scrollSidebar).
+  const dev = await ctl.recordActualCursor(p);
+  reportWarp('msg-scroll', p, ctl.lastPlaced, dev);
   await sleep(600);
 }
 
 /**
  * Open a chatroom (by name or {name}) and OCR its messages.
- *   - re-locates the row (fresh coords), clicks its center with cliclick,
+ *   - re-locates the row (fresh coords), clicks its center via the input helper,
  *   - waits ~1s for the chat to render, screenshots + OCRs,
  *   - keeps only the message-area column (x > 33% width),
  *   - optionally scrolls up `scrollRounds` extra screenfuls to load older
  *     history, merging + de-duplicating by text (heuristic; oldest first).
+ * `onOpened(bool)` (optional) is invoked once with whether the opened room's
+ * header matched the target — lets the caller tell "reads worked" from "clicks
+ * did nothing" without changing the return shape (server.js relies on the array).
  * @returns {Promise<Array<{sender,time,text,raw}>>}
  */
-export async function readChatMessages(chat, wi, { scrollRounds = 0 } = {}) {
+export async function readChatMessages(chat, wi, { scrollRounds = 0, onOpened } = {}) {
   const name = typeof chat === 'string' ? chat : chat.name;
   const ctl = getScanControl();
   ctl.enterPhase(`chat:${name}`); // per-chat watchdog (locate + read) + fresh scroll budget
   const loc = await locateChat(name, wi);
   await ctl.checkpoint(); // gate before the click that opens the room
-  await cliclick([`c:${loc.screenX},${loc.screenY}`]);
+  await input(['click', loc.screenX, loc.screenY]); // via the one granted helper (cliclick clicks were dropped under launchd)
   await sleep(1000); // let the room render AND the cursor settle before we baseline it
   // Baseline on the cursor's ACTUAL settled position (same-source read), not the
   // intended click point — LINE's post-click layout can nudge the cursor a few
-  // dozen px, which must not be read as the user grabbing the mouse.
-  reportWarp(`open:${name}`, { x: loc.screenX, y: loc.screenY }, ctl.lastPlaced, await ctl.recordActualCursor({ x: loc.screenX, y: loc.screenY }));
+  // dozen px, which must not be read as the user grabbing the mouse. Sequence the
+  // record before reading ctl.lastPlaced (arg-eval order; see scrollSidebar).
+  const dev = await ctl.recordActualCursor({ x: loc.screenX, y: loc.screenY });
+  reportWarp(`open:${name}`, { x: loc.screenX, y: loc.screenY }, ctl.lastPlaced, dev);
 
   const passes = [];
   for (let round = 0; round <= scrollRounds; round++) {
@@ -633,6 +657,7 @@ export async function readChatMessages(chat, wi, { scrollRounds = 0 } = {}) {
       // the messages" — the two candidate causes of the 10-rooms-0-messages run.
       const header = allLines.filter((l) => l.y <= topCut).map((l) => l.text.trim()).filter(Boolean);
       const opened = roomHeaderMatch(header, name);
+      if (typeof onOpened === 'function') onOpened(opened);
       process.stderr.write(
         `[open] 「${name}」 標題列${opened ? '已核對✓' : '未核對✗'}：${header.slice(0, 4).join(' / ') || '(空)'}\n`
       );

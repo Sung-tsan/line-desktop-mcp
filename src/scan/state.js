@@ -144,6 +144,30 @@ export async function writeScanMeta(meta) {
   });
 }
 
+/**
+ * Should the incremental watermark advance after this scan? Advancing tells the
+ * next scan "everything up to now is read", so a WRONG advance silently drops
+ * real messages (they get incrementally skipped). Advance only when the scan is
+ * trustworthy AND landed:
+ *   - never on abort (partial results),
+ *   - never when the push layer said "don't advance" (unconfigured / failed / queued),
+ *   - never when we READ rooms but EVERY one came back empty AND not a single
+ *     room's open was verified — that is the exact signature of a broken input
+ *     path (e.g. 2026-07-22: clicks dropped under launchd, so all 7 rooms
+ *     re-screenshotted the sidebar and "found" 0 messages). Holding the watermark
+ *     makes the next run re-read them. Rather re-scan than miss.
+ * A quiet day where clicks DO work (>=1 verified open, 0 new) still advances, so
+ * incremental filtering is not permanently defeated.
+ *
+ * @param {{aborted:any, pushAdvance:boolean, scanned:number, totalNew:number, verifiedOpens:number}} o
+ */
+export function shouldAdvanceWatermark({ aborted, pushAdvance, scanned, totalNew, verifiedOpens }) {
+  if (aborted) return false;
+  if (!pushAdvance) return false;
+  if (scanned > 0 && totalNew === 0 && (verifiedOpens || 0) === 0) return false;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // sidebar-marker resolution (pure) — used to decide which rooms to skip
 // ---------------------------------------------------------------------------

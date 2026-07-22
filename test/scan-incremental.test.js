@@ -8,7 +8,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveSidebarMarker, shouldSkipRoom, INCREMENTAL_MARGIN_MS } from '../src/scan/state.js';
+import {
+  resolveSidebarMarker,
+  shouldSkipRoom,
+  shouldAdvanceWatermark,
+  INCREMENTAL_MARGIN_MS,
+} from '../src/scan/state.js';
 
 // Reference "now": 2026-07-14 10:00 local (a Tuesday, but tests derive weekday
 // from now.getDay() so they don't depend on that fact).
@@ -105,4 +110,45 @@ test('shouldSkipRoom: unparseable marker fails open (scan, never lose messages)'
   const lastSuccess = NOW.toISOString();
   assert.equal(shouldSkipRoom('在線中', lastSuccess, NOW), false);
   assert.equal(shouldSkipRoom('', lastSuccess, NOW), false);
+});
+
+test('shouldAdvanceWatermark: broken input path (all reads empty, 0 verified opens) => HOLD', () => {
+  // 2026-07-22 signature: clicks dropped under launchd => 7 rooms all read 0.
+  assert.equal(
+    shouldAdvanceWatermark({ aborted: null, pushAdvance: true, scanned: 7, totalNew: 0, verifiedOpens: 0 }),
+    false
+  );
+});
+
+test('shouldAdvanceWatermark: quiet day with working clicks (verified opens, 0 new) => ADVANCE', () => {
+  // incremental must NOT be permanently defeated when reads genuinely work.
+  assert.equal(
+    shouldAdvanceWatermark({ aborted: null, pushAdvance: true, scanned: 7, totalNew: 0, verifiedOpens: 7 }),
+    true
+  );
+});
+
+test('shouldAdvanceWatermark: new messages found => ADVANCE (even if some opens unverified)', () => {
+  assert.equal(
+    shouldAdvanceWatermark({ aborted: null, pushAdvance: true, scanned: 5, totalNew: 12, verifiedOpens: 0 }),
+    true
+  );
+});
+
+test('shouldAdvanceWatermark: nothing read (all incrementally skipped) => ADVANCE', () => {
+  assert.equal(
+    shouldAdvanceWatermark({ aborted: null, pushAdvance: true, scanned: 0, totalNew: 0, verifiedOpens: 0 }),
+    true
+  );
+});
+
+test('shouldAdvanceWatermark: abort or held push => HOLD regardless', () => {
+  assert.equal(
+    shouldAdvanceWatermark({ aborted: { reason: 'activity' }, pushAdvance: true, scanned: 3, totalNew: 9, verifiedOpens: 3 }),
+    false
+  );
+  assert.equal(
+    shouldAdvanceWatermark({ aborted: null, pushAdvance: false, scanned: 3, totalNew: 9, verifiedOpens: 3 }),
+    false
+  );
 });
