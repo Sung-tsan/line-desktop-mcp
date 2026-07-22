@@ -270,4 +270,27 @@ export function shouldSkipRoom(markerText, lastSuccessAt, now = new Date()) {
   return marker.getTime() < cutoff;
 }
 
+// Default recency window. Sung 2026-07-22: 「第一次掃這樣就夠了，有些太久的已經
+// 過期沒有價值了」— even on the FIRST scan we only open rooms touched recently, so
+// a single run finishes inside the 10-min watchdog (no full 127-room sweep).
+// Assumption to flag: 7 days is the default; override with SCAN_RECENCY_DAYS.
+export const RECENCY_DEFAULT_DAYS = 7;
+
+/**
+ * Recency gate: should this room be SKIPPED as too old to be worth opening?
+ * A room whose sidebar timestamp resolves to older than `cutoffMs` before `now`
+ * is skipped. Absent/unparseable markers FAIL OPEN (return false = read it) so an
+ * OCR miss never silently drops an active room. Unlike shouldSkipRoom this is
+ * independent of the incremental watermark — it bounds even the first scan.
+ * @param {string} markerText  sidebar timestamp text (e.g. "下午 3:24"/"昨天"/"6月30日")
+ * @param {Date}   now
+ * @param {number} cutoffMs    max age in ms (older => skip)
+ */
+export function isRoomTooOld(markerText, now, cutoffMs) {
+  const marker = resolveSidebarMarker(markerText, now);
+  if (!marker) return false; // unparseable/absent -> fail open (scan it)
+  if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) return false; // no/invalid cutoff -> never skip
+  return now.getTime() - marker.getTime() > cutoffMs;
+}
+
 export { STATE_DIR, OUT_DIR, INCREMENTAL_MARGIN_MS };

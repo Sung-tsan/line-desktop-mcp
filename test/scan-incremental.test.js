@@ -12,12 +12,14 @@ import {
   resolveSidebarMarker,
   shouldSkipRoom,
   shouldAdvanceWatermark,
+  isRoomTooOld,
   INCREMENTAL_MARGIN_MS,
 } from '../src/scan/state.js';
 
 // Reference "now": 2026-07-14 10:00 local (a Tuesday, but tests derive weekday
 // from now.getDay() so they don't depend on that fact).
 const NOW = new Date(2026, 6, 14, 10, 0, 0, 0);
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 test('resolveSidebarMarker: bare HH:MM => today at that time', () => {
   const d = resolveSidebarMarker('09:47', NOW);
@@ -140,6 +142,21 @@ test('shouldAdvanceWatermark: nothing read (all incrementally skipped) => ADVANC
     shouldAdvanceWatermark({ aborted: null, pushAdvance: true, scanned: 0, totalNew: 0, verifiedOpens: 0 }),
     true
   );
+});
+
+test('isRoomTooOld: recent marker within cutoff => keep (not too old)', () => {
+  assert.equal(isRoomTooOld('09:47', NOW, WEEK_MS), false); // today
+  assert.equal(isRoomTooOld('昨天', NOW, WEEK_MS), false); // ~10h ago
+});
+
+test('isRoomTooOld: marker older than cutoff => skip (too old)', () => {
+  assert.equal(isRoomTooOld('6月30日', NOW, WEEK_MS), true); // ~14 days before NOW
+});
+
+test('isRoomTooOld: unparseable marker or no cutoff => never skip (fail open)', () => {
+  assert.equal(isRoomTooOld('在線中', NOW, WEEK_MS), false); // unparseable -> read
+  assert.equal(isRoomTooOld('', NOW, WEEK_MS), false);
+  assert.equal(isRoomTooOld('6月30日', NOW, 0), false); // cutoff 0 -> gate disabled
 });
 
 test('shouldAdvanceWatermark: abort or held push => HOLD regardless', () => {

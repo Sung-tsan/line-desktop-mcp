@@ -48,6 +48,8 @@ import {
   writeScanMeta,
   shouldSkipRoom,
   shouldAdvanceWatermark,
+  isRoomTooOld,
+  RECENCY_DEFAULT_DAYS,
 } from '../src/scan/state.js';
 import {
   loadDikwConfig,
@@ -59,7 +61,7 @@ import {
 import { initScanControl, isFatalAbort, ScanAbort } from '../src/scan/scan-control.js';
 
 function parseArgs(argv) {
-  const cfg = { dry: false, idleMin: 5, force: false, full: false, help: false };
+  const cfg = { dry: false, idleMin: 5, force: false, full: false, help: false, recencyDays: undefined, debugShots: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry') cfg.dry = true;
@@ -67,27 +69,39 @@ function parseArgs(argv) {
     else if (a === '--full') cfg.full = true;
     else if (a === '-h' || a === '--help') cfg.help = true;
     else if (a === '--idle-min') cfg.idleMin = parseFloat(argv[++i]);
+    else if (a === '--recency-days') cfg.recencyDays = parseFloat(argv[++i]);
+    else if (a === '--debug-shots') cfg.debugShots = true;
   }
   if (!Number.isFinite(cfg.idleMin)) cfg.idleMin = 5;
+  // recency: CLI flag > env SCAN_RECENCY_DAYS > default. 0/negative => no cutoff.
+  if (!Number.isFinite(cfg.recencyDays)) cfg.recencyDays = parseFloat(process.env.SCAN_RECENCY_DAYS);
+  if (!Number.isFinite(cfg.recencyDays)) cfg.recencyDays = RECENCY_DEFAULT_DAYS;
   return cfg;
 }
 
 const HELP = `LINE work-chat sweep (screenshot + OCR).
 
 Usage: node scripts/scan-once.js [--dry] [--idle-min N] [--force] [--full]
+                                 [--recency-days N] [--debug-shots]
 
-  --dry         List chatrooms only (no clicks / screenshots / reads).
-                Use it to pick names for the blocklist.
-  --idle-min N  Require >= N minutes idle before scanning (default 5).
-                Below the threshold the scan is skipped, so you are never
-                interrupted mid-work. Ignored with --dry.
-  --force       Skip ONLY the startup idle check. It does NOT disable the
-                mid-run safety guards (abort sentinel, total/stage/scroll
-                watchdog, live cursor-activity detection) — those always run.
-  --full        Force a full sweep, ignoring the incremental watermark
-                (scan-meta.json). Use after config/state changes or to backfill.
-                Without it, rooms untouched since the last successful scan are
-                skipped (unparseable timestamps are always scanned).
+  --dry            List chatrooms only (no clicks / screenshots / reads).
+                   Use it to pick names for the blocklist.
+  --idle-min N     Require >= N minutes idle before scanning (default 5).
+                   Below the threshold the scan is skipped, so you are never
+                   interrupted mid-work. Ignored with --dry.
+  --force          Skip ONLY the startup idle check. It does NOT disable the
+                   mid-run safety guards (abort sentinel, total/stage/scroll
+                   watchdog, live cursor-activity detection) — those always run.
+  --full           Force a full sweep, ignoring the incremental watermark
+                   (scan-meta.json). Use after config/state changes or to backfill.
+                   Without it, rooms untouched since the last successful scan are
+                   skipped (unparseable timestamps are always scanned).
+  --recency-days N Only OPEN rooms whose sidebar timestamp is within N days
+                   (default ${RECENCY_DEFAULT_DAYS}; env SCAN_RECENCY_DAYS; 0 = no cutoff). Older
+                   rooms are enumerated but not read, so a single run fits the
+                   10-min watchdog. Unparseable timestamps are always read.
+  --debug-shots    Save each opened room's message-area screenshot to state/out/
+                   (SCAN_DEBUG_SHOTS=1). Writes LINE content to disk — diagnostic.
 
 Safety (see README "安全機制" / scripts/scan-abort.sh):
   Abort a running scan:   scripts/scan-abort.sh   (touches state/ABORT + pkill)
@@ -145,6 +159,8 @@ async function main() {
     process.stdout.write(HELP);
     return;
   }
+  // Enable per-room screenshot dumps for THIS run (read live in scan-engine).
+  if (cfg.debugShots) process.env.SCAN_DEBUG_SHOTS = '1';
 
   await ensureDirs();
   // Arm the safety spine (clears any stale ABORT sentinel from a prior aborted
@@ -190,6 +206,9 @@ async function main() {
     let enumerated = 0;
     let keptCount = 0;
     let skippedCount = 0;
+    let tooOldCount = 0; // rooms skipped by the recency cutoff (marker older than N days)
+    let readOk = 0; // rooms readChatMessages actually returned from (reached OCR)
+    let readFail = 0; // rooms that threw a non-fatal error before returning (e.g. locate timeout)
     let verifiedOpens = 0; // rooms whose header confirmed the click actually opened them
     let aborted = null;
     try {
@@ -200,25 +219,37 @@ async function main() {
       const kept = applyBlocklist(all, blocklist);
       keptCount = kept.length;
 
-      // Incremental filter: drop rooms whose sidebar marker predates the
-      // watermark (minus safety margin). Never skip a first-seen room (no prior
-      // read to trust) or an unparseable marker (shouldSkipRoom fails open).
+      // Two skip filters (both fail open on an unparseable/absent marker):
+      //  1) recency cutoff — never open a room untouched for > recencyDays. Applies
+      //     even on the first scan (Sung: 太久的已過期沒價值), and is what keeps a
+      //     single run inside the 10-min watchdog instead of a 127-room sweep.
+      //  2) incremental — skip rooms whose marker predates the last-success
+      //     watermark (only once a watermark exists; never a first-seen room).
       const now = new Date();
+      const cutoffMs = cfg.recencyDays > 0 ? cfg.recencyDays * 24 * 60 * 60 * 1000 : 0;
       const toRead = [];
       const skippedNames = [];
+      const tooOldNames = [];
       for (const chat of kept) {
-        if (incremental && !firstSeen.has(chat.name) && shouldSkipRoom(chat.marker, meta.lastSuccessAt, now)) {
+        if (cutoffMs > 0 && isRoomTooOld(chat.marker, now, cutoffMs)) {
+          tooOldNames.push(chat.name);
+        } else if (incremental && !firstSeen.has(chat.name) && shouldSkipRoom(chat.marker, meta.lastSuccessAt, now)) {
           skippedNames.push(chat.name);
         } else {
           toRead.push(chat);
         }
       }
       skippedCount = skippedNames.length;
-      const modeLabel = incremental ? `增量·略過 ${skippedCount}/${keptCount} 室` : '全掃';
+      tooOldCount = tooOldNames.length;
+      const recencyLabel = cutoffMs > 0 ? `近 ${cfg.recencyDays} 天·略過舊 ${tooOldCount}` : '不限時間';
+      const modeLabel = incremental ? `增量略過 ${skippedCount}` : '全掃';
+      if (tooOldNames.length) {
+        process.stderr.write(`[scan] 恆定略過 ${tooOldCount} 室（marker 超過 ${cfg.recencyDays} 天）：${tooOldNames.slice(0, 12).join('、')}${tooOldNames.length > 12 ? ' …' : ''}\n`);
+      }
       if (skippedNames.length) {
         process.stderr.write(`[scan] 增量略過 ${skippedCount} 室（marker 早於上次掃描）：${skippedNames.slice(0, 12).join('、')}${skippedNames.length > 12 ? ' …' : ''}\n`);
       }
-      void postStatus('running', 'read', `列舉 ${all.length} 室 · ${modeLabel} · 讀 ${toRead.length} 室中`);
+      void postStatus('running', 'read', `列舉 ${all.length} 室 · ${recencyLabel} · ${modeLabel} · 讀 ${toRead.length} 室中`);
 
       let i = 0;
       for (const chat of toRead) {
@@ -230,13 +261,17 @@ async function main() {
           const withFp = msgs.map((m) => ({ ...m, fp: fingerprint(m) }));
           const fresh = await diffAndRecord(chat.name, withFp);
           newMessages = fresh.map(({ fp, ...m }) => m);
+          readOk += 1;
           process.stderr.write(`[scan] read ${i}/${toRead.length} ${chat.name}: +${newMessages.length}\n`);
         } catch (e) {
           // A fatal abort (sentinel / total timeout / user activity) must unwind
           // the whole sweep — do NOT swallow it as a per-chat error.
           if (isFatalAbort(e)) throw e;
           error = e?.message || String(e);
-          process.stderr.write(`[scan] read ${i}/${toRead.length} ${chat.name}: skipped (${error})\n`);
+          readFail += 1;
+          // Not a black box: a room that failed BEFORE reaching the read (e.g. the
+          // row never located) has no [open]/[msg] line, so name it here explicitly.
+          process.stderr.write(`[read-fail] ${i}/${toRead.length} 「${chat.name}」：${error}\n`);
         }
         chats.push({
           name: chat.name,
@@ -251,7 +286,11 @@ async function main() {
       // false abort is diagnosable from the JSON, not a bare {reason:'activity'}.
       aborted = { reason: e.reason, phase: e.phase, ...(e.evidence ? { evidence: e.evidence } : {}) };
     }
-    return { dry: false, chats, enumerated, scanned: chats.length, kept: keptCount, skipped: skippedCount, verifiedOpens, incremental, aborted };
+    return {
+      dry: false, chats, enumerated, scanned: chats.length,
+      readOk, readFail, tooOld: tooOldCount,
+      kept: keptCount, skipped: skippedCount, verifiedOpens, incremental, aborted,
+    };
   });
 
   if (result.dry) {
@@ -270,7 +309,14 @@ async function main() {
   await writeFile(mdPath, toMarkdown(scan), 'utf8');
 
   const totalNew = scan.chats.reduce((s, c) => s + c.newMessages.length, 0);
-  const modeSummary = result.incremental ? `增量略過 ${result.skipped}/${result.kept} 室` : '全掃';
+  // Honest summary: separate the skip reasons and, crucially, "reached the read"
+  // (readOk) from "failed before reading" (readFail) — the 17:28 run reported
+  // "已讀 17" that were all locate-timeouts. modeSummary is reused by postStatus.
+  const modeSummary =
+    `略過 舊${result.tooOld}` +
+    (result.incremental ? `/增量${result.skipped}` : '') +
+    ` · 讀 ${result.readOk} 室` +
+    (result.readFail ? `（失敗 ${result.readFail}）` : '');
   if (result.aborted) {
     const { reason, phase, evidence } = result.aborted;
     // Activity aborts carry the measured cursor gap so a *false* trip is
@@ -282,11 +328,11 @@ async function main() {
         : '';
     console.error(
       `⚠ watchdog 中止於階段「${phase}」（原因：${reason}）${ev}。已還原游標/焦點，` +
-        `保留部分結果：列舉 ${result.enumerated} 室、${modeSummary}、已讀 ${result.scanned} 室、新訊息 ${totalNew} 則。`
+        `保留部分結果：列舉 ${result.enumerated} 室、${modeSummary}、新訊息 ${totalNew} 則。`
     );
   } else {
     console.error(
-      `掃描完成：列舉 ${result.enumerated} 室、${modeSummary}、讀取 ${result.scanned} 室、新訊息 ${totalNew} 則。`
+      `掃描完成：列舉 ${result.enumerated} 室、${modeSummary}、新訊息 ${totalNew} 則。`
     );
   }
   console.error(`  JSON: ${jsonPath}`);
@@ -315,9 +361,9 @@ async function main() {
     );
   }
 
-  const doneDetail = `列舉 ${result.enumerated} 室 · ${modeSummary} · 讀 ${result.scanned} 室 · 新訊息 ${totalNew} 則`;
+  const doneDetail = `列舉 ${result.enumerated} 室 · ${modeSummary} · 新訊息 ${totalNew} 則`;
   if (result.aborted) {
-    await postStatus('aborted', result.aborted.phase, `原因:${result.aborted.reason} · 部分結果:${modeSummary}·讀${result.scanned}·新訊息${totalNew}`, push.counts);
+    await postStatus('aborted', result.aborted.phase, `原因:${result.aborted.reason} · 部分結果:${modeSummary}·新訊息${totalNew}`, push.counts);
   } else {
     await postStatus('done', '', doneDetail, push.counts);
   }

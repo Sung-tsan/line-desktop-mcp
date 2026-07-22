@@ -124,7 +124,9 @@ export async function restoreCursor(pos) {
 
 // Save each room's message-area screenshot to OUT_DIR for manual inspection.
 // Off by default — it writes LINE content to disk (privacy) and one PNG per room.
-const DEBUG_SHOTS = process.env.SCAN_DEBUG_SHOTS === '1';
+// Read LIVE (not cached at import) so scan-once's --debug-shots flag, which sets
+// the env var at startup, takes effect for this run.
+const debugShots = () => process.env.SCAN_DEBUG_SHOTS === '1';
 
 // Per-warp cursor diagnostics. `reportWarp` logs target→actual→diff for every
 // warp/click whose gap exceeds a few px, so ONE enumerate run tells us whether a
@@ -668,7 +670,14 @@ export async function readChatMessages(chat, wi, { scrollRounds = 0, onOpened } 
     process.stderr.write(
       `[msg] 「${name}」 pass${round}: OCR ${allLines.length} 行 → 訊息欄濾後 ${msgLines.length} 行 → 解析 ${parsed.length} 則\n`
     );
-    if (DEBUG_SHOTS) await saveDebugShot(wi, name, round);
+    // Decisive signal when parse yields nothing: dump the raw text the message
+    // column DID capture. Real chat lines here => the bubble parser is broken;
+    // sidebar/UI chrome or emptiness => a capture/geometry problem.
+    if (parsed.length === 0 && msgLines.length > 0) {
+      const sample = msgLines.slice(0, 6).map((l) => (l.text || '').trim()).filter(Boolean).join(' ¦ ');
+      process.stderr.write(`[msg-sample] 「${name}」 訊息欄前 ${Math.min(6, msgLines.length)} 行原文：${sample || '(全空白)'}\n`);
+    }
+    if (debugShots()) await saveDebugShot(wi, name, round);
     passes.push(parsed);
   }
 
