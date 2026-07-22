@@ -550,10 +550,11 @@ export async function readChatMessages(chat, wi, { scrollRounds = 0 } = {}) {
   const loc = await locateChat(name, wi);
   await ctl.checkpoint(); // gate before the click that opens the room
   await cliclick([`c:${loc.screenX},${loc.screenY}`]);
-  // cliclick parks the cursor at the click point; record its ACTUAL position
-  // (same-source read) as the activity baseline, not the intended coordinates.
+  await sleep(1000); // let the room render AND the cursor settle before we baseline it
+  // Baseline on the cursor's ACTUAL settled position (same-source read), not the
+  // intended click point — LINE's post-click layout can nudge the cursor a few
+  // dozen px, which must not be read as the user grabbing the mouse.
   noteCursorDeviation(await ctl.recordActualCursor({ x: loc.screenX, y: loc.screenY }));
-  await sleep(1000);
 
   const passes = [];
   for (let round = 0; round <= scrollRounds; round++) {

@@ -191,3 +191,22 @@ test('recordActualCursor falls back to the intended point when the live read fai
   assert.deepEqual(ctl.lastPlaced, { x: 12, y: 34 }, 'no live read -> keep the intended baseline');
   assert.equal(dev, null, 'no deviation reported when actual is unknown');
 });
+
+test('recordActualCursor retries a transient null read before falling back (fixes the 34px click abort)', async () => {
+  // 2026-07-22 chat:… abort: recorded=intended(1389,387), observed=settled(1355,389).
+  // A cliclick `p` racing the preceding click returned null once -> old code fell
+  // back to the intended point -> the next checkpoint tripped on the 34px settle.
+  clearAbortSentinel();
+  let calls = 0;
+  const settled = { x: 1355, y: 389 };
+  const ctl = createScanController({
+    totalMs: 999999,
+    cursorTolerancePx: 10,
+    readCursor: async () => (++calls === 1 ? null : settled), // first read races empty; retry succeeds
+  });
+  const dev = await ctl.recordActualCursor({ x: 1389, y: 387 });
+  assert.ok(calls >= 2, 'retried after the transient null read');
+  assert.deepEqual(ctl.lastPlaced, settled, 'baseline is the ACTUAL settled cursor, not the intended fallback');
+  assert.equal(dev, Math.round(Math.hypot(1389 - 1355, 387 - 389)));
+  await ctl.checkpoint(); // same settled cursor -> must NOT trip a false activity
+});

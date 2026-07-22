@@ -30,6 +30,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const execFileP = promisify(execFile);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const STATE_DIR = join(__dirname, 'state');
@@ -232,28 +233,38 @@ class ScanController {
    * detecting an ineffective warp.
    *
    * Why this exists (root cause of the 2026-07-18..22 false "activity" aborts):
-   * the old code recorded the INTENDED point. If the warp landed anywhere else —
-   * Retina/multi-display coord skew, or (the confirmed case) a warp that never
-   * moved the cursor because the launchd daemon lacks the Accessibility TCC grant
-   * that posting HID events needs (Screen Recording is a *separate* grant) — the
-   * next checkpoint compared the live cursor against a point it was never at and
-   * cried "user activity", every single scan. Recording the ACTUAL position keeps
-   * baseline and comparison in one coordinate space, so that can't happen; a
-   * genuine user move is still caught because it lands AFTER this readback.
+   * the old code recorded the INTENDED point. If the actual cursor landed
+   * anywhere else — a warp that never moved it (scroll.swift used to post a
+   * .mouseMoved event, silently dropped in the launchd context; fixed to
+   * CGWarpMouseCursorPosition), or a small click-settle offset — the next
+   * checkpoint compared the live cursor against a point it was never at and
+   * cried "user activity". Recording the ACTUAL position keeps baseline and
+   * comparison in one coordinate space, so that can't happen; a genuine user
+   * move is still caught because it lands AFTER this readback.
+   *
+   * The read is retried a couple of times because a cliclick `p` fired
+   * immediately after another cliclick action (the click that opens a room) can
+   * transiently return nothing — and a null read here silently falls back to the
+   * intended point, which is exactly the 34px false abort seen on 2026-07-22
+   * (recorded=intended click point, observed=settled cursor).
    *
    * @returns {Promise<number|null>} px deviation between intended and actual
    *   (null if either is unavailable). A large deviation means the warp/click did
    *   not take effect — callers surface it instead of silently degrading.
    */
   async recordActualCursor(intended) {
-    const actual = await this.readCursor(); // {x,y} | null, via cliclick p (no extra TCC grant to READ)
+    let actual = await this.readCursor(); // {x,y} | null, via cliclick p (reading needs no TCC grant)
+    for (let retry = 0; !actual && retry < 2; retry++) {
+      await sleep(40); // a cliclick p racing a preceding cliclick action can come back empty; let it settle
+      actual = await this.readCursor();
+    }
     const aim =
       typeof intended === 'string'
         ? parseCursor(intended)
         : intended && Number.isFinite(intended.x) && Number.isFinite(intended.y)
           ? { x: intended.x, y: intended.y }
           : null;
-    this.recordCursor(actual || aim); // prefer ACTUAL; fall back to intended only if the read failed
+    this.recordCursor(actual || aim); // prefer ACTUAL; fall back to intended only if the read genuinely failed
     return actual && aim ? Math.round(cursorDistance(actual, aim)) : null;
   }
 
