@@ -109,22 +109,77 @@ export async function restoreCursor(pos) {
   }
 }
 
-// Warn at most once per run: a large gap between where we AIMED a warp/click and
-// where the cursor ACTUALLY landed means the event was dropped — almost always
-// the launchd daemon missing the Accessibility TCC grant (posting HID events
-// needs it; Screen Recording is a separate grant, and READING the cursor needs
-// neither). Without this, an ineffective warp degrades silently to a
-// first-screen-only scan. Threshold is generous (>40px) so it never fires on
-// sub-pixel rounding or a normal in-window warp.
+// Save each room's message-area screenshot to OUT_DIR for manual inspection.
+// Off by default — it writes LINE content to disk (privacy) and one PNG per room.
+const DEBUG_SHOTS = process.env.SCAN_DEBUG_SHOTS === '1';
+
+// Per-warp cursor diagnostics. `reportWarp` logs target→actual→diff for every
+// warp/click whose gap exceeds a few px, so ONE enumerate run tells us whether a
+// residual is a constant OFFSET (same diff at every target => display-origin bug)
+// or SCALING (diff grows with distance => point/pixel or Retina-scale bug). It is
+// self-silencing: once the coord math is right, diffs fall under the threshold and
+// nothing prints. The >40px case additionally fires the one-shot "warp may be
+// ineffective" warning (kept from the CGWarp fix era).
 let _warpIneffectiveWarned = false;
-function noteCursorDeviation(deviationPx) {
-  if (deviationPx == null || deviationPx <= 40 || _warpIneffectiveWarned) return;
-  _warpIneffectiveWarned = true;
+function reportWarp(context, target, actual, deviationPx) {
+  if (deviationPx == null) return;
+  if (deviationPx > 8) {
+    process.stderr.write(
+      `[cursor] ${context}: 目標(${target?.x},${target?.y})→實測(${actual?.x ?? '?'},${actual?.y ?? '?'})＝差 ${deviationPx}px\n`
+    );
+  }
+  if (deviationPx > 40 && !_warpIneffectiveWarned) {
+    _warpIneffectiveWarned = true;
+    process.stderr.write(
+      `警告：游標實際落點與預期相距 ${deviationPx}px——warp/scroll/click 可能未生效或座標換算有誤。掃描結果恐不完整。\n`
+    );
+  }
+}
+
+// One-time log of the LINE window rect + screenshot pixel size + derived scale.
+// This is the ground truth for every coord translation: scale=shot.px/win.point
+// (2.0 on a Retina panel, 1.0 on the external), and winX<0/winY<0 tells us the
+// window is on a non-main display — both are prime suspects for the 194px warp
+// residual and the "0 messages" column-filter.
+let _geomLogged = false;
+function logGeomOnce(wi, o) {
+  if (_geomLogged) return;
+  _geomLogged = true;
+  const scale = wi.winW ? o.width / wi.winW : NaN;
+  const where = wi.winX < 0 || wi.winY < 0 ? '負座標(外接/非主螢幕)' : '主螢幕座標區';
   process.stderr.write(
-    `警告：游標實際落點與預期相距 ${deviationPx}px——warp/scroll/click 可能未生效` +
-      `（背景服務可能缺 Accessibility 權限，與螢幕錄製為不同授權；讀取游標不需此權限故不會報錯）。` +
-      `掃描恐只讀到第一屏。\n`
+    `[geom] LINE 視窗 point=(x${wi.winX},y${wi.winY},${wi.winW}x${wi.winH}) 截圖 px=(${o.width}x${o.height}) ` +
+      `scale=${Number.isFinite(scale) ? scale.toFixed(3) : '?'} 落在 ${where}\n`
   );
+}
+
+/**
+ * Does any header-region OCR line plausibly match the room we clicked to open?
+ * Used to tell "the click missed / opened the wrong room" apart from "the click
+ * landed but the message parser dropped everything". Lenient (OCR varies), but
+ * not trivially true. Pure + exported for unit testing.
+ */
+export function roomHeaderMatch(headerTexts, name) {
+  const target = normalizeChatName(name);
+  if (!target) return false;
+  return (headerTexts || []).some((t) => {
+    const n = normalizeChatName(t);
+    if (!n) return false;
+    return n === target || n.includes(target) || (n.length >= 3 && target.includes(n));
+  });
+}
+
+// Debug-only (SCAN_DEBUG_SHOTS=1): keep a screenshot of what we captured for a
+// room, so a human can see whether it's the chat, the sidebar, or the desktop.
+async function saveDebugShot(wi, name, round) {
+  try {
+    const safe = String(name).replace(/[^\p{L}\p{N}]+/gu, '_').slice(0, 40) || 'room';
+    const dest = join(OUT_DIR, `debug-${safe}-r${round}-${Date.now()}.png`);
+    await execFileP('screencapture', ['-x', '-o', '-l', String(wi.wid), dest], { timeout: 10000 });
+    process.stderr.write(`[shot] 存 ${dest}\n`);
+  } catch (e) {
+    process.stderr.write(`[shot] 失敗：${e?.message || e}\n`);
+  }
 }
 
 /** Name of the frontmost application (or null). */
@@ -263,6 +318,7 @@ function isChatNameCandidate(text) {
  */
 export async function listSidebarChats(wi) {
   const o = await captureOcr(wi);
+  logGeomOnce(wi, o); // ground-truth window rect + screenshot px + scale, logged once
   const scale = o.width / wi.winW;
   const rowHpx = SIDEBAR_ROW_LOGICAL_H * scale;
   const lines = o.lines || [];
@@ -320,8 +376,9 @@ async function scrollSidebar(wi, lines) {
   // scroll.swift warped the cursor toward (p.x,p.y). Record where it ACTUALLY
   // landed (read via cliclick, same source as the activity guard) — not the
   // intended point — so a warp that lands elsewhere (coord skew) or never fires
-  // (daemon lacks Accessibility) can't be misread as the user moving the mouse.
-  noteCursorDeviation(await ctl.recordActualCursor(p));
+  // can't be misread as the user moving the mouse. Sidebar scrolls all target the
+  // SAME point, so a constant diff here = pure offset (see reportWarp).
+  reportWarp('sidebar-scroll', p, ctl.lastPlaced, await ctl.recordActualCursor(p));
   await sleep(250);
 }
 
@@ -530,7 +587,7 @@ async function scrollMsgAreaUp(wi) {
   const p = scrollScreenPoint(wi, 'msg');
   await execFileP(SCROLL_BIN, [String(p.x), String(p.y), '5'], { timeout: 6000 });
   // Baseline on the cursor's ACTUAL landing (same-source read), not the aimed point.
-  noteCursorDeviation(await ctl.recordActualCursor(p));
+  reportWarp('msg-scroll', p, ctl.lastPlaced, await ctl.recordActualCursor(p));
   await sleep(600);
 }
 
@@ -554,19 +611,40 @@ export async function readChatMessages(chat, wi, { scrollRounds = 0 } = {}) {
   // Baseline on the cursor's ACTUAL settled position (same-source read), not the
   // intended click point — LINE's post-click layout can nudge the cursor a few
   // dozen px, which must not be read as the user grabbing the mouse.
-  noteCursorDeviation(await ctl.recordActualCursor({ x: loc.screenX, y: loc.screenY }));
+  reportWarp(`open:${name}`, { x: loc.screenX, y: loc.screenY }, ctl.lastPlaced, await ctl.recordActualCursor({ x: loc.screenX, y: loc.screenY }));
 
   const passes = [];
   for (let round = 0; round <= scrollRounds; round++) {
     if (round > 0) await scrollMsgAreaUp(wi);
     const o = await captureOcr(wi);
+    logGeomOnce(wi, o);
     const minX = o.width * MSGAREA_MIN_X_FRAC;
     // drop the top header bar (chat title / search box / back button) and the
     // bottom input box; real messages begin well below ~11% (measured live).
     const topCut = o.height * 0.11;
     const botCut = o.height * 0.92;
-    const msgLines = (o.lines || []).filter((l) => l.x > minX && l.y > topCut && l.y < botCut);
-    passes.push(parseMessagesFromOcr(msgLines, o.width));
+    const allLines = o.lines || [];
+    const msgLines = allLines.filter((l) => l.x > minX && l.y > topCut && l.y < botCut);
+    const parsed = parseMessagesFromOcr(msgLines, o.width);
+
+    if (round === 0) {
+      // Did the click actually open THIS room? Compare the header band against the
+      // target name. This separates "click missed / wrong room" from "parser ate
+      // the messages" — the two candidate causes of the 10-rooms-0-messages run.
+      const header = allLines.filter((l) => l.y <= topCut).map((l) => l.text.trim()).filter(Boolean);
+      const opened = roomHeaderMatch(header, name);
+      process.stderr.write(
+        `[open] 「${name}」 標題列${opened ? '已核對✓' : '未核對✗'}：${header.slice(0, 4).join(' / ') || '(空)'}\n`
+      );
+    }
+    // Where do messages vanish? total OCR lines -> lines in the message column/band
+    // -> parsed messages. msgLines=0 => column/cut geometry wrong (layout/scale);
+    // parsed=0 with msgLines>0 => the bubble parser is the culprit.
+    process.stderr.write(
+      `[msg] 「${name}」 pass${round}: OCR ${allLines.length} 行 → 訊息欄濾後 ${msgLines.length} 行 → 解析 ${parsed.length} 則\n`
+    );
+    if (DEBUG_SHOTS) await saveDebugShot(wi, name, round);
+    passes.push(parsed);
   }
 
   // passes[0] = current (newest) screen; later passes are older (scrolled up).
